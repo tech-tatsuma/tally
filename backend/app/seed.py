@@ -10,6 +10,8 @@ from app.core.config import get_settings
 from app.db.base import Base
 from app.db.session import SessionLocal, engine
 from app.models.entities import Account, AccountType, Category, CategoryType, Frequency, RecurringTransaction, Transaction, TransactionType, User
+from app.core.security import hash_password
+from app.models.entities import UserRole
 
 
 async def seed():
@@ -17,7 +19,7 @@ async def seed():
     user_id = uuid.UUID(get_settings().default_user_id)
     async with SessionLocal() as s:
         if await s.scalar(select(User.id).where(User.id == user_id)): return
-        user = User(id=user_id, name="たつま", email="tatsuma@example.com")
+        user = User(id=user_id, name="たつま", email="tatsuma@example.com", password_hash=hash_password(get_settings().seed_admin_password), role=UserRole.admin)
         accounts = [Account(user_id=user_id, name="メイン銀行", institution_name="みらい銀行", account_type=AccountType.bank, initial_balance=Decimal("1080000")), Account(user_id=user_id, name="貯蓄口座", institution_name="つばさ銀行", account_type=AccountType.bank, initial_balance=Decimal("720000")), Account(user_id=user_id, name="現金", account_type=AccountType.cash, initial_balance=Decimal("80000")), Account(user_id=user_id, name="投資", account_type=AccountType.investment, initial_balance=Decimal("350000"))]
         categories = [Category(user_id=user_id, name=n, type=t, color=c) for n, t, c in [("食費", CategoryType.expense, "#00c4cc"), ("カフェ", CategoryType.expense, "#ff9100"), ("住居費", CategoryType.expense, "#2d4b9b"), ("交通費", CategoryType.expense, "#69d7ff"), ("娯楽", CategoryType.expense, "#e65537"), ("給与", CategoryType.income, "#4bb47d")]]
         s.add(user); s.add_all(accounts + categories); await s.flush()

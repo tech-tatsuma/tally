@@ -80,3 +80,11 @@ class BackupService:
             await self.session.commit(); return {"restored": counts, "schema_version": envelope.schema_version}
         except Exception as exc:
             await self.session.rollback(); raise HTTPException(422, f"Backup could not be restored: {exc}") from exc
+
+    async def delete_all(self) -> dict:
+        counts = {}
+        for model in reversed(TABLES):
+            result = await self.session.execute(delete(model).where(model.user_id == self.user_id))
+            counts[model.__tablename__] = result.rowcount or 0
+        await self.session.commit()
+        return {"deleted": counts}

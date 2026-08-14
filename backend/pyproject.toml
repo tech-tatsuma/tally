@@ -13,6 +13,7 @@ dependencies = [
   "pydantic-settings>=2.10,<3",
   "fastmcp>=2.11,<3",
   "python-multipart>=0.0.20,<1",
+  "email-validator>=2.2,<3",
 ]
 
 [dependency-groups]
@@ -24,4 +25,3 @@ testpaths = ["tests"]
 
 [tool.ruff]
 line-length = 100
-

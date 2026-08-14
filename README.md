@@ -13,9 +13,11 @@ docker compose up --build
 - アプリ: http://localhost:3000
 - APIドキュメント: http://localhost:8000/docs
 
-開発用データは初回起動時に自動登録されます。停止は `docker compose down`、DBも初期化する場合はバックアップ取得後に `docker compose down -v` を実行してください。
+初回は画面の「新規アカウント作成」から登録してください。最初に登録したユーザーが管理者になり、以降は一般ユーザーとして作成されます。停止は `docker compose down`、DBも初期化する場合はバックアップ取得後に `docker compose down -v` を実行してください。
 
-MCPサーバーは `cd backend && uv run python -m app.mcp.server` でstdio起動できます。バックエンドテストは `cd backend && uv run pytest` です。
+MCPサーバーは、設定画面でユーザー専用MCPトークンを作成し、`cd backend && MCP_ACCESS_TOKEN=<token> uv run python -m app.mcp.server` でstdio起動できます。HTTP接続では `Authorization: Bearer <token>` を設定してください。バックエンドテストは `cd backend && uv run pytest` です。
+
+パスワード再設定メールを本番利用する場合は、`.env.example` のSMTP項目を設定してください。開発環境では送信トークンを画面に引き継いで、そのまま再設定を検証できます。
 
 ## 主な設計
 
@@ -24,4 +26,5 @@ MCPサーバーは `cd backend && uv run python -m app.mcp.server` でstdio起�
 - 資産推移はMVPでは取引から再計算します。データ量増加時にスナップショットを追加できます。
 - 定期取引はルールIDと期間キーの一意制約で二重生成を防止します。
 - REST APIとMCPは同じService Layerを利用します。
+- ログインセッションはHttpOnly Cookieで端末に30日間保持され、API・MCPともサーバー側でユーザー所有権を検証します。
 - バックアップはスキーマバージョン付きJSONです。復元は全件検証後、DBトランザクション内で置換します。
