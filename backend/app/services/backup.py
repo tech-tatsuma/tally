@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
 
 from fastapi import HTTPException
@@ -16,6 +16,28 @@ TABLES = [Account, Category, RecurringTransaction, Transaction]
 def json_value(value):
     if isinstance(value, (datetime, Decimal, uuid.UUID)): return str(value)
     if hasattr(value, "value"): return value.value
+    return value
+
+
+def database_value(column, value):
+    """Convert portable JSON scalars back to the model's database-safe Python type."""
+    if value is None:
+        return None
+    enum_class = getattr(column.type, "enum_class", None)
+    if enum_class:
+        return enum_class(value)
+    try:
+        python_type = column.type.python_type
+    except NotImplementedError:
+        return value
+    if python_type is uuid.UUID:
+        return uuid.UUID(value)
+    if python_type is Decimal:
+        return Decimal(value)
+    if python_type is datetime:
+        return datetime.fromisoformat(value)
+    if python_type is date:
+        return date.fromisoformat(value)
     return value
 
 
@@ -47,11 +69,14 @@ class BackupService:
             for model in TABLES:
                 rows = envelope.data[model.__tablename__]; counts[model.__tablename__] = len(rows)
                 for row in rows:
-                    values = {k: v for k, v in row.items() if k in model.__table__.columns.keys()}
+                    values = {
+                        k: database_value(model.__table__.columns[k], v)
+                        for k, v in row.items()
+                        if k in model.__table__.columns.keys()
+                    }
                     values["user_id"] = self.user_id
                     self.session.add(model(**values))
                 await self.session.flush()
             await self.session.commit(); return {"restored": counts, "schema_version": envelope.schema_version}
         except Exception as exc:
             await self.session.rollback(); raise HTTPException(422, f"Backup could not be restored: {exc}") from exc
-

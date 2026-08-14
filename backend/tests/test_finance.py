@@ -6,6 +6,7 @@ from sqlalchemy import select
 from app.models.entities import Account, Category, CategoryType, Transaction
 from app.schemas.common import RecurringCreate, TransactionCreate, TransactionUpdate
 from app.services.analytics import AnalyticsService
+from app.services.backup import BackupService
 from app.services.finance import FinanceService
 from tests.conftest import USER_ID
 
@@ -55,3 +56,15 @@ async def test_cashflow_and_asset_history(session):
     history = await analytics.asset_history(date(2026, 8, 1), date(2026, 8, 31))
     assert history[-1]["assets"] == Decimal("16800")
 
+
+async def test_backup_round_trip(session):
+    accounts, expense, _ = await fixtures(session)
+    finance = FinanceService(session, USER_ID)
+    await finance.create_transaction(TransactionCreate(account_id=accounts[0].id, category_id=expense.id, type="expense", amount="850", occurred_at=datetime(2026, 8, 14, tzinfo=timezone.utc), title="Lunch", journal="A good day"))
+    backup = BackupService(session, USER_ID)
+    exported = await backup.export()
+    result = await backup.restore(exported)
+    restored = list(await session.scalars(select(Transaction)))
+    assert result["restored"]["transactions"] == 1
+    assert restored[0].amount == Decimal("850")
+    assert restored[0].journal == "A good day"
