@@ -105,7 +105,17 @@ class FinanceService:
     async def update_recurring(self, recurring_id: uuid.UUID, data: RecurringUpdate) -> RecurringTransaction:
         recurring = await self.session.scalar(select(RecurringTransaction).where(RecurringTransaction.id == recurring_id, RecurringTransaction.user_id == self.user_id))
         if not recurring: raise HTTPException(404, "Recurring transaction not found")
+        account_id = data.account_id or recurring.account_id
+        type_ = data.type or recurring.type
+        category_id = data.category_id if "category_id" in data.model_fields_set else recurring.category_id
+        if not await self.repo.account(self.user_id, account_id): raise HTTPException(422, "Account not found")
+        await self.validate_category(category_id, type_)
         for key, value in data.model_dump(exclude_unset=True).items(): setattr(recurring, key, value)
+        if recurring.end_date and recurring.start_date > recurring.end_date:
+            raise HTTPException(422, "start_date must be before end_date")
+        if {"start_date", "execution_day", "frequency"} & data.model_fields_set:
+            base = max(recurring.start_date, date.today())
+            recurring.next_execution_date = self._next_occurrence(base, recurring.execution_day, recurring.frequency.value)
         await self.session.commit(); await self.session.refresh(recurring); return recurring
 
     @staticmethod

@@ -127,12 +127,18 @@ class RecurringCreate(BaseModel):
 
 
 class RecurringUpdate(BaseModel):
+    account_id: uuid.UUID | None = None
+    category_id: uuid.UUID | None = None
+    type: TransactionType | None = None
     amount: Decimal | None = Field(default=None, gt=0)
     title: str | None = Field(default=None, min_length=1)
     description: str | None = None
     journal_template: str | None = None
+    frequency: Frequency | None = None
+    start_date: date | None = None
     end_date: date | None = None
     execution_day: int | None = Field(default=None, ge=1, le=31)
+    enabled: bool | None = None
 
 
 class RecurringRead(ORMModel):
@@ -142,7 +148,11 @@ class RecurringRead(ORMModel):
     type: TransactionType
     amount: Decimal
     title: str
+    description: str | None
+    journal_template: str | None
     frequency: Frequency
+    start_date: date
+    end_date: date | None
     execution_day: int
     next_execution_date: date
     enabled: bool
@@ -158,4 +168,3 @@ class CashflowPoint(BaseModel):
     income: Decimal
     expense: Decimal
     net: Decimal
-

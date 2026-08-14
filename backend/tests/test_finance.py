@@ -4,7 +4,7 @@ from decimal import Decimal
 from sqlalchemy import select
 
 from app.models.entities import Account, Category, CategoryType, Transaction
-from app.schemas.common import RecurringCreate, TransactionCreate, TransactionUpdate
+from app.schemas.common import RecurringCreate, RecurringUpdate, TransactionCreate, TransactionUpdate
 from app.services.analytics import AnalyticsService
 from app.services.backup import BackupService
 from app.services.finance import FinanceService
@@ -44,6 +44,15 @@ async def test_recurring_is_idempotent(session):
     await service.create_recurring(RecurringCreate(account_id=accounts[0].id, category_id=expense.id, type="expense", amount="80000", title="Rent", frequency="monthly", start_date=date(2026, 8, 1), execution_day=25))
     assert await service.process_due_recurring_transactions(date(2026, 8, 25)) == 1
     assert await service.process_due_recurring_transactions(date(2026, 8, 25)) == 0
+
+
+async def test_recurring_update_changes_schedule(session):
+    accounts, expense, _ = await fixtures(session); service = FinanceService(session, USER_ID)
+    recurring = await service.create_recurring(RecurringCreate(account_id=accounts[0].id, category_id=expense.id, type="expense", amount="1200", title="Service", frequency="monthly", start_date=date(2026, 8, 1), execution_day=10))
+    updated = await service.update_recurring(recurring.id, RecurringUpdate(amount="1500", execution_day=20, title="Updated service"))
+    assert updated.amount == Decimal("1500")
+    assert updated.execution_day == 20
+    assert updated.title == "Updated service"
 
 
 async def test_cashflow_and_asset_history(session):
