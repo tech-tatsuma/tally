@@ -1,0 +1,43 @@
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: tally
+      POSTGRES_USER: tally
+      POSTGRES_PASSWORD: tally
+    volumes:
+      - tally-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tally"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+  backend:
+    build: ./backend
+    environment:
+      DATABASE_URL: postgresql+asyncpg://tally:tally@db:5432/tally
+      APP_ENV: production
+      APP_TIMEZONE: Asia/Tokyo
+      CORS_ORIGINS: http://localhost:3000
+    ports: ["8000:8000"]
+    depends_on:
+      db: { condition: service_healthy }
+  scheduler:
+    build: ./backend
+    command: ["python", "-m", "app.scheduler"]
+    environment:
+      DATABASE_URL: postgresql+asyncpg://tally:tally@db:5432/tally
+      APP_TIMEZONE: Asia/Tokyo
+    depends_on:
+      backend: { condition: service_started }
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8000/api/v1
+    ports: ["3000:3000"]
+    depends_on: [backend]
+volumes:
+  tally-db:
+

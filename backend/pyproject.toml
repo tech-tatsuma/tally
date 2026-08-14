@@ -1,0 +1,27 @@
+[project]
+name = "tally-backend"
+version = "0.1.0"
+description = "Personal finance and journal API"
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi>=0.116,<1",
+  "uvicorn[standard]>=0.35,<1",
+  "sqlalchemy[asyncio]>=2.0.41,<3",
+  "asyncpg>=0.30,<1",
+  "aiosqlite>=0.21,<1",
+  "alembic>=1.16,<2",
+  "pydantic-settings>=2.10,<3",
+  "fastmcp>=2.11,<3",
+  "python-multipart>=0.0.20,<1",
+]
+
+[dependency-groups]
+dev = ["pytest>=8.4,<9", "pytest-asyncio>=1.1,<2", "httpx>=0.28,<1"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+
