@@ -4,13 +4,12 @@ from datetime import date, datetime
 from decimal import Decimal
 
 from fastmcp import FastMCP
-from fastmcp.server.dependencies import get_http_headers
+from fastmcp.server.dependencies import get_http_request
 from sqlalchemy import select
 
-from app.core.config import get_settings
 from app.core.security import token_hash
 from app.db.session import SessionLocal
-from app.models.entities import ApiToken, TransactionType, User
+from app.models.entities import McpConnection, TransactionType, User
 from app.repositories.finance import FinanceRepository
 from app.schemas.common import AccountCreate, AccountUpdate, RecurringCreate, RecurringUpdate, TransactionCreate, TransactionUpdate
 from app.services.analytics import AnalyticsService
@@ -21,18 +20,19 @@ mcp = FastMCP("Tally — personal finance and journal")
 
 @asynccontextmanager
 async def user_session():
-    """Resolve one MCP bearer token to exactly one active user for every tool call."""
-    header = get_http_headers().get("authorization", "")
-    raw = header.removeprefix("Bearer ").strip() if header.startswith("Bearer ") else (get_settings().mcp_access_token or "")
-    if not raw.startswith("tlly_mcp_"):
-        raise PermissionError("A Tally MCP access token is required")
+    """Resolve the Streamable HTTP capability URL to exactly one active user."""
+    try:
+        raw = get_http_request().path_params["connection_key"]
+    except (KeyError, RuntimeError) as error:
+        raise PermissionError("A user-specific Tally MCP URL is required") from error
+    if not raw.startswith("tlly_mcpurl_"):
+        raise PermissionError("MCP URL is invalid or has been revoked")
     async with SessionLocal() as session:
-        item = await session.scalar(select(ApiToken).where(ApiToken.token_hash == token_hash(raw), ApiToken.revoked_at.is_(None)))
+        item = await session.scalar(select(McpConnection).where(McpConnection.secret_hash == token_hash(raw), McpConnection.revoked_at.is_(None)))
         now = datetime.now().astimezone()
-        expires = item.expires_at if item and item.expires_at and item.expires_at.tzinfo else (item.expires_at.replace(tzinfo=now.tzinfo) if item and item.expires_at else None)
-        user = await session.get(User, item.user_id) if item and (not expires or expires > now) else None
+        user = await session.get(User, item.user_id) if item else None
         if not user or not user.is_active:
-            raise PermissionError("MCP access token is invalid or expired")
+            raise PermissionError("MCP URL is invalid, revoked, or its user is disabled")
         item.last_used_at = now
         await session.commit()
         yield session, user.id

@@ -32,8 +32,13 @@ test("includes login, password recovery, profile, and role-aware management", as
   assert.match(app, /mode === "register"/);
   assert.match(app, /\/auth\/forgot-password/);
   assert.match(app, /プロフィールを編集/);
+  assert.match(app, /カテゴリを追加/);
   assert.match(app, /user\.role === "admin"/);
   assert.match(app, /MCP連携/);
-  assert.match(css, /\.auth-shell/);
-  assert.match(css, /@media \(max-width:760px\)/);
+  assert.match(app, /donutGradient/);
+  assert.match(app, /style=\{\{ background: donutGradient\(categoryTotals\) \}\}/);
+  assert.doesNotMatch(
+    css,
+    /conic-gradient\(#2d4b9b 0 42%,#00c4cc 42% 66%/,
+  );
 });

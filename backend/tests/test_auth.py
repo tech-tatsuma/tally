@@ -4,7 +4,7 @@ from fastapi import HTTPException
 from sqlalchemy import select
 
 from app.core.security import verify_password
-from app.models.entities import Account, AccountType, ApiToken, User, UserRole, UserSession
+from app.models.entities import Account, AccountType, ApiToken, Category, McpConnection, User, UserRole, UserSession
 from app.services.auth import AuthService
 from app.services.finance import FinanceService
 
@@ -14,11 +14,10 @@ async def test_register_login_profile_and_persistent_session(session):
     user = await auth.register("Second user", "SECOND@example.com", "StrongPassword123")
     assert user.email == "second@example.com"
     assert user.role == UserRole.user
-    cash = await session.scalar(select(Account).where(Account.user_id == user.id))
-    assert cash is not None
-    assert cash.name == "現金"
-    assert cash.account_type == AccountType.cash
-    assert cash.initial_balance == 0
+    assert (await session.scalar(select(Account).where(Account.user_id == user.id))) is None
+    names = {c.name for c in (await session.scalars(select(Category).where(Category.user_id == user.id)))}
+    assert "食費" in names
+    assert "給与" in names
     assert (await auth.authenticate("second@example.com", "StrongPassword123")).id == user.id
     raw, login = await auth.create_session(user, remember_me=True)
     assert raw.startswith("tlly_sess_")
@@ -66,4 +65,21 @@ async def test_api_tokens_and_finance_are_user_scoped(session):
     first_accounts = await FinanceService(session, (await session.scalar(select(User).where(User.email == "test@example.com"))).id).list_accounts()
     second_accounts = await FinanceService(session, second.id).list_accounts()
     assert {a["name"] for a in first_accounts} == {"Main", "Savings"}
-    assert {a["name"] for a in second_accounts} == {"現金", "Private"}
+    assert {a["name"] for a in second_accounts} == {"Private"}
+
+
+async def test_mcp_connection_url_is_rotated_and_user_scoped(session):
+    auth = AuthService(session)
+    user = await auth.register("MCP user", "mcp-user@example.com", "StrongPassword123")
+    first, first_secret = await auth.rotate_mcp_connection(user)
+    second, second_secret = await auth.rotate_mcp_connection(user)
+
+    assert first_secret.startswith("tlly_mcpurl_")
+    assert second_secret.startswith("tlly_mcpurl_")
+    assert first_secret != second_secret
+    assert first.revoked_at is not None
+    assert second.revoked_at is None
+    active = await session.scalar(
+        select(McpConnection).where(McpConnection.user_id == user.id, McpConnection.revoked_at.is_(None))
+    )
+    assert active.id == second.id

@@ -72,3 +72,15 @@ class ApiTokenRead(BaseModel):
 
 class ApiTokenCreated(ApiTokenRead):
     token: str
+
+
+class McpConnectionRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    secret_prefix: str
+    last_used_at: datetime | None
+    created_at: datetime
+
+
+class McpConnectionCreated(McpConnectionRead):
+    url: str

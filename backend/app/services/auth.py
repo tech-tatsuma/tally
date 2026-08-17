@@ -2,7 +2,6 @@ import asyncio
 import smtplib
 import uuid
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
 from email.message import EmailMessage
 
 from fastapi import HTTPException
@@ -11,7 +10,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.core.security import hash_password, new_token, token_hash, valid_password, verify_password
-from app.models.entities import Account, AccountType, ApiToken, PasswordResetToken, User, UserRole, UserSession
+from app.models.entities import ApiToken, Category, CategoryType, McpConnection, PasswordResetToken, User, UserRole, UserSession
+
+STARTER_CATEGORIES = [
+    ("食費", CategoryType.expense, "#00c4cc"),
+    ("日用品", CategoryType.expense, "#706d65"),
+    ("住居費", CategoryType.expense, "#2d4b9b"),
+    ("交通費", CategoryType.expense, "#69d7ff"),
+    ("娯楽", CategoryType.expense, "#e65537"),
+    ("給与", CategoryType.income, "#4bb47d"),
+    ("その他収入", CategoryType.income, "#2d7df0"),
+]
 
 
 def _aware(value: datetime) -> datetime:
@@ -36,7 +45,7 @@ class AuthService:
         user = User(name=name.strip(), email=email, password_hash=hash_password(password), role=self._role_for_email(email))
         self.session.add(user)
         await self.session.flush()
-        self.session.add(Account(user_id=user.id, name="現金", account_type=AccountType.cash, initial_balance=Decimal("0"), currency=user.currency))
+        self.session.add_all([Category(user_id=user.id, name=name, type=kind, color=color) for name, kind, color in STARTER_CATEGORIES])
         await self.session.commit()
         await self.session.refresh(user)
         return user
@@ -117,6 +126,25 @@ class AuthService:
         raw = new_token("tlly_mcp_")
         expires = datetime.now(timezone.utc) + timedelta(days=days) if days else None
         item = ApiToken(user_id=user.id, name=name.strip(), token_hash=token_hash(raw), token_prefix=raw[:14], expires_at=expires)
+        self.session.add(item)
+        await self.session.commit()
+        await self.session.refresh(item)
+        return item, raw
+
+    async def rotate_mcp_connection(self, user: User) -> tuple[McpConnection, str]:
+        """Issue one new capability URL and revoke any older URL for this user."""
+        now = datetime.now(timezone.utc)
+        await self.session.execute(
+            update(McpConnection)
+            .where(McpConnection.user_id == user.id, McpConnection.revoked_at.is_(None))
+            .values(revoked_at=now)
+        )
+        raw = new_token("tlly_mcpurl_")
+        item = McpConnection(
+            user_id=user.id,
+            secret_hash=token_hash(raw),
+            secret_prefix=raw[:18],
+        )
         self.session.add(item)
         await self.session.commit()
         await self.session.refresh(item)

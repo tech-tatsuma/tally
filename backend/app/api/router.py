@@ -2,21 +2,22 @@ import uuid
 from datetime import date, datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Body, Depends, Query, Request, Response
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, Response
 from sqlalchemy import delete, func, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import current_user, current_user_id, require_admin
 from app.core.config import get_settings
 from app.db.session import get_session
-from app.models.entities import ApiToken, Category, RecurringTransaction, TransactionType, User, UserRole
+from app.models.entities import ApiToken, Category, McpConnection, RecurringTransaction, Transaction, TransactionType, User, UserRole
 from app.repositories.finance import FinanceRepository
-from app.schemas.common import AccountCreate, AccountRead, AccountUpdate, CategoryCreate, CategoryRead, CreditSettlementRead, RecurringCreate, RecurringRead, RecurringUpdate, TransactionCreate, TransactionPage, TransactionRead, TransactionUpdate
+from app.schemas.common import AccountCreate, AccountRead, AccountUpdate, CategoryCreate, CategoryRead, CategoryUpdate, CreditSettlementRead, RecurringCreate, RecurringRead, RecurringUpdate, TransactionCreate, TransactionPage, TransactionRead, TransactionUpdate
 from app.services.analytics import AnalyticsService
 from app.services.backup import BackupService
 from app.services.finance import FinanceService
 from app.services.auth import AuthService
-from app.schemas.auth import AdminUserUpdate, ApiTokenCreate, ApiTokenCreated, ApiTokenRead, ForgotPasswordRequest, LoginRequest, PasswordChangeRequest, ProfileUpdate, RegisterRequest, ResetPasswordRequest, UserRead
+from app.schemas.auth import AdminUserUpdate, ApiTokenCreate, ApiTokenCreated, ApiTokenRead, ForgotPasswordRequest, LoginRequest, McpConnectionCreated, McpConnectionRead, PasswordChangeRequest, ProfileUpdate, RegisterRequest, ResetPasswordRequest, UserRead
 
 router = APIRouter()
 Session = Annotated[AsyncSession, Depends(get_session)]
@@ -115,6 +116,41 @@ async def revoke_api_token(token_id: uuid.UUID, user: CurrentUser, session: Sess
     await session.commit(); return Response(status_code=204)
 
 
+def mcp_public_base_url(request: Request) -> str:
+    configured = get_settings().mcp_public_base_url
+    if configured:
+        return configured.rstrip("/")
+    forwarded_proto = request.headers.get("x-forwarded-proto", request.url.scheme).split(",")[0].strip()
+    forwarded_host = request.headers.get("x-forwarded-host", request.headers.get("host", request.url.netloc)).split(",")[0].strip()
+    return f"{forwarded_proto}://{forwarded_host}".rstrip("/")
+
+
+@router.get("/auth/mcp-connection", response_model=McpConnectionRead | None)
+async def mcp_connection(user: CurrentUser, session: Session):
+    return await session.scalar(
+        select(McpConnection)
+        .where(McpConnection.user_id == user.id, McpConnection.revoked_at.is_(None))
+        .order_by(McpConnection.created_at.desc())
+    )
+
+
+@router.post("/auth/mcp-connection", response_model=McpConnectionCreated, status_code=201)
+async def create_mcp_connection(request: Request, user: CurrentUser, session: Session):
+    item, secret = await AuthService(session).rotate_mcp_connection(user)
+    return {**item.__dict__, "url": f"{mcp_public_base_url(request)}/mcp/{secret}"}
+
+
+@router.delete("/auth/mcp-connection", status_code=204)
+async def revoke_mcp_connection(user: CurrentUser, session: Session):
+    await session.execute(
+        update(McpConnection)
+        .where(McpConnection.user_id == user.id, McpConnection.revoked_at.is_(None))
+        .values(revoked_at=datetime.now().astimezone())
+    )
+    await session.commit()
+    return Response(status_code=204)
+
+
 @router.get("/admin/users", response_model=list[UserRead])
 async def list_users(_: AdminUser, session: Session):
     return list(await session.scalars(select(User).order_by(User.created_at)))
@@ -175,13 +211,34 @@ async def list_categories(session: Session, user_id: UserId, type: str | None = 
 
 @router.post("/categories", response_model=CategoryRead, status_code=201)
 async def create_category(data: CategoryCreate, session: Session, user_id: UserId):
-    category = Category(user_id=user_id, **data.model_dump()); session.add(category); await session.commit(); await session.refresh(category); return category
+    category = Category(user_id=user_id, **data.model_dump()); session.add(category)
+    try:
+        await session.commit(); await session.refresh(category)
+    except IntegrityError:
+        await session.rollback(); raise HTTPException(409, "A category with this name already exists")
+    return category
+
+
+@router.patch("/categories/{category_id}", response_model=CategoryRead)
+async def update_category(category_id: uuid.UUID, data: CategoryUpdate, session: Session, user_id: UserId):
+    category = await session.scalar(select(Category).where(Category.id == category_id, Category.user_id == user_id))
+    if not category: raise HTTPException(404, "Category not found")
+    for key, value in data.model_dump(exclude_unset=True).items(): setattr(category, key, value)
+    try:
+        await session.commit(); await session.refresh(category)
+    except IntegrityError:
+        await session.rollback(); raise HTTPException(409, "A category with this name already exists")
+    return category
 
 
 @router.delete("/categories/{category_id}", status_code=204)
 async def delete_category(category_id: uuid.UUID, session: Session, user_id: UserId):
-    in_use = await session.scalar(select(Category.id).join(Category, isouter=True)) if False else None
-    await session.execute(delete(Category).where(Category.id == category_id, Category.user_id == user_id)); await session.commit(); return Response(status_code=204)
+    category = await session.scalar(select(Category).where(Category.id == category_id, Category.user_id == user_id))
+    if not category: raise HTTPException(404, "Category not found")
+    in_transactions = await session.scalar(select(func.count(Transaction.id)).where(Transaction.user_id == user_id, Transaction.category_id == category_id)) or 0
+    in_recurring = await session.scalar(select(func.count(RecurringTransaction.id)).where(RecurringTransaction.user_id == user_id, RecurringTransaction.category_id == category_id)) or 0
+    if in_transactions or in_recurring: raise HTTPException(409, "Category is in use")
+    await session.delete(category); await session.commit(); return Response(status_code=204)
 
 
 @router.get("/transactions", response_model=TransactionPage)

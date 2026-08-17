@@ -20,6 +20,7 @@ services:
       APP_TIMEZONE: Asia/Tokyo
       CORS_ORIGINS: http://localhost:3000
       ADMIN_EMAIL: ${ADMIN_EMAIL:-}
+      MCP_PUBLIC_BASE_URL: ${MCP_PUBLIC_BASE_URL:-http://localhost:8000}
     ports: ["8000:8000"]
     depends_on:
       db: { condition: service_healthy }
@@ -48,4 +49,3 @@ services:
       backend: { condition: service_healthy }
 volumes:
   tally-db:
-

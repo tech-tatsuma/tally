@@ -68,6 +68,12 @@ class CategoryRead(ORMModel):
     color: str | None
 
 
+class CategoryUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=80)
+    icon: str | None = None
+    color: str | None = Field(default=None, pattern=r"^#[0-9A-Fa-f]{6}$")
+
+
 class TransactionCreate(BaseModel):
     account_id: uuid.UUID
     destination_account_id: uuid.UUID | None = None

@@ -24,7 +24,8 @@ class Settings(BaseSettings):
     smtp_starttls: bool = True
     seed_admin_password: str = "ChangeMe123!"
     admin_email: str | None = None
-    mcp_access_token: str | None = None
+    # A public API origin used when issuing an MCP URL. Leave unset for the request origin.
+    mcp_public_base_url: str | None = None
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     @property

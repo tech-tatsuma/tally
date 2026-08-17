@@ -96,6 +96,18 @@ class ApiToken(TimestampMixin, Base):
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class McpConnection(TimestampMixin, Base):
+    """A revocable, user-scoped capability URL for Streamable HTTP MCP."""
+
+    __tablename__ = "mcp_connections"
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    secret_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    secret_prefix: Mapped[str] = mapped_column(String(18), index=True)
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+
+
 class Account(TimestampMixin, Base):
     __tablename__ = "accounts"
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
