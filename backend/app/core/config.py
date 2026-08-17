@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     smtp_from: str | None = None
     smtp_starttls: bool = True
     seed_admin_password: str = "ChangeMe123!"
+    admin_email: str | None = None
     mcp_access_token: str | None = None
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

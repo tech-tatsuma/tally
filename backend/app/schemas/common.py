@@ -18,12 +18,25 @@ class AccountCreate(BaseModel):
     initial_balance: Decimal = Decimal("0")
     currency: str = Field(default="JPY", min_length=3, max_length=3)
     description: str | None = None
+    credit_payment_day: int | None = Field(default=None, ge=1, le=31)
+    credit_payment_account_id: uuid.UUID | None = None
+
+    @model_validator(mode="after")
+    def validate_credit_fields(self):
+        if self.account_type != AccountType.credit and (self.credit_payment_day is not None or self.credit_payment_account_id is not None):
+            raise ValueError("credit_payment_day and credit_payment_account_id require account_type=credit")
+        if (self.credit_payment_day is None) != (self.credit_payment_account_id is None):
+            raise ValueError("credit_payment_day and credit_payment_account_id must be set together")
+        return self
 
 
 class AccountUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=100)
+    account_type: AccountType | None = None
     institution_name: str | None = None
     description: str | None = None
+    credit_payment_day: int | None = Field(default=None, ge=1, le=31)
+    credit_payment_account_id: uuid.UUID | None = None
 
 
 class AccountRead(ORMModel):
@@ -36,6 +49,8 @@ class AccountRead(ORMModel):
     currency: str
     description: str | None
     is_archived: bool
+    credit_payment_day: int | None
+    credit_payment_account_id: uuid.UUID | None
 
 
 class CategoryCreate(BaseModel):
@@ -94,6 +109,7 @@ class TransactionRead(ORMModel):
     journal: str | None
     transfer_group_id: uuid.UUID | None
     transfer_direction: str | None
+    credit_settlement_id: uuid.UUID | None
 
 
 class TransactionPage(BaseModel):
@@ -156,6 +172,16 @@ class RecurringRead(ORMModel):
     execution_day: int
     next_execution_date: date
     enabled: bool
+
+
+class CreditSettlementRead(ORMModel):
+    id: uuid.UUID
+    credit_account_id: uuid.UUID
+    payment_account_id: uuid.UUID
+    period_key: str
+    amount: Decimal
+    transfer_group_id: uuid.UUID | None
+    settled_on: date
 
 
 class AssetPoint(BaseModel):

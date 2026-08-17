@@ -20,6 +20,19 @@ async def test_register_login_profile_and_persistent_session(session):
     assert (login.expires_at.replace(tzinfo=timezone.utc) - datetime.now(timezone.utc)).days >= 29
 
 
+async def test_admin_email_from_settings_becomes_administrator(session):
+    auth = AuthService(session)
+    previous = auth.settings.admin_email
+    auth.settings.admin_email = "Owner@example.com"
+    try:
+        first = await auth.register("First", "someone@example.com", "StrongPassword123")
+        admin = await auth.register("Owner", "owner@example.com", "StrongPassword123")
+        assert first.role == UserRole.user
+        assert admin.role == UserRole.admin
+    finally:
+        auth.settings.admin_email = previous
+
+
 async def test_password_reset_is_one_time_and_revokes_sessions(session):
     auth = AuthService(session)
     user = await session.scalar(select(User).where(User.email == "test@example.com"))

@@ -11,7 +11,7 @@ from app.core.config import get_settings
 from app.db.session import get_session
 from app.models.entities import ApiToken, Category, RecurringTransaction, TransactionType, User, UserRole
 from app.repositories.finance import FinanceRepository
-from app.schemas.common import AccountCreate, AccountRead, AccountUpdate, CategoryCreate, CategoryRead, RecurringCreate, RecurringRead, RecurringUpdate, TransactionCreate, TransactionPage, TransactionRead, TransactionUpdate
+from app.schemas.common import AccountCreate, AccountRead, AccountUpdate, CategoryCreate, CategoryRead, CreditSettlementRead, RecurringCreate, RecurringRead, RecurringUpdate, TransactionCreate, TransactionPage, TransactionRead, TransactionUpdate
 from app.services.analytics import AnalyticsService
 from app.services.backup import BackupService
 from app.services.finance import FinanceService
@@ -156,6 +156,14 @@ async def delete_account(account_id: uuid.UUID, session: Session, user_id: UserI
 @router.get("/accounts/{account_id}/balance")
 async def get_account_balance(account_id: uuid.UUID, session: Session, user_id: UserId):
     account = await FinanceService(session, user_id).get_account(account_id); return {"account_id": account_id, "balance": account["current_balance"], "currency": account["currency"]}
+
+
+@router.get("/accounts/{account_id}/credit-settlements", response_model=list[CreditSettlementRead])
+async def list_credit_settlements(account_id: uuid.UUID, session: Session, user_id: UserId): return await FinanceService(session, user_id).list_credit_settlements(account_id)
+
+
+@router.post("/credit-settlements/process")
+async def process_credit_settlements(session: Session, user_id: UserId, target_date: date = Query(default_factory=date.today)): return {"settled": await FinanceService(session, user_id).process_due_credit_settlements(target_date)}
 
 
 @router.get("/categories", response_model=list[CategoryRead])

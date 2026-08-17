@@ -13,7 +13,7 @@ docker compose up --build
 - アプリ: http://localhost:3000
 - APIドキュメント: http://localhost:8000/docs
 
-初回は画面の「新規アカウント作成」から登録してください。最初に登録したユーザーが管理者になり、以降は一般ユーザーとして作成されます。停止は `docker compose down`、DBも初期化する場合はバックアップ取得後に `docker compose down -v` を実行してください。
+初回は画面の「新規アカウント作成」から登録してください。管理者にするメールアドレスは環境変数 `ADMIN_EMAIL` で指定します。そのアドレスで登録したユーザーが管理者になり、それ以外は一般ユーザーです。停止は `docker compose down`、DBも初期化する場合はバックアップ取得後に `docker compose down -v` を実行してください。
 
 MCPサーバーは、設定画面でユーザー専用MCPトークンを作成し、`cd backend && MCP_ACCESS_TOKEN=<token> uv run python -m app.mcp.server` でstdio起動できます。HTTP接続では `Authorization: Bearer <token>` を設定してください。バックエンドテストは `cd backend && uv run pytest` です。
 

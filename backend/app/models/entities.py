@@ -18,6 +18,7 @@ class AccountType(str, enum.Enum):
     cash = "cash"
     wallet = "wallet"
     investment = "investment"
+    credit = "credit"
     other = "other"
 
 
@@ -106,6 +107,11 @@ class Account(TimestampMixin, Base):
     currency: Mapped[str] = mapped_column(String(3), default="JPY")
     description: Mapped[str | None] = mapped_column(Text)
     is_archived: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    # Credit-card settings: which day of the month the balance is auto-debited, and from which account.
+    credit_payment_day: Mapped[int | None] = mapped_column(Integer)
+    credit_payment_account_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("accounts.id", use_alter=True, name="fk_accounts_credit_payment_account_id_accounts", deferrable=True, initially="DEFERRED")
+    )
 
 
 class Category(TimestampMixin, Base):
@@ -117,6 +123,27 @@ class Category(TimestampMixin, Base):
     type: Mapped[CategoryType] = mapped_column(Enum(CategoryType))
     icon: Mapped[str | None] = mapped_column(String(30))
     color: Mapped[str | None] = mapped_column(String(7))
+
+
+class CreditSettlement(TimestampMixin, Base):
+    """Records one automatic credit-card payoff run for a (credit account, month) pair.
+
+    Idempotency key is (credit_account_id, period_key): once a period has been settled, the
+    scheduler will not settle it again. Any expense/income transactions on the credit account
+    that were not yet linked to a settlement (e.g. entered late, or backdated) are swept into
+    whichever settlement runs next, regardless of which month they actually occurred in.
+    """
+
+    __tablename__ = "credit_settlements"
+    __table_args__ = (UniqueConstraint("credit_account_id", "period_key"),)
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), index=True)
+    credit_account_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("accounts.id"), index=True)
+    payment_account_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("accounts.id"))
+    period_key: Mapped[str] = mapped_column(String(10))
+    amount: Mapped[Decimal] = mapped_column(Numeric(18, 2))
+    transfer_group_id: Mapped[uuid.UUID | None] = mapped_column(index=True)
+    settled_on: Mapped[date] = mapped_column(Date)
 
 
 class Transaction(TimestampMixin, Base):
@@ -136,6 +163,7 @@ class Transaction(TimestampMixin, Base):
     transfer_direction: Mapped[TransferDirection | None] = mapped_column(Enum(TransferDirection))
     recurring_transaction_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("recurring_transactions.id"))
     recurring_period_key: Mapped[str | None] = mapped_column(String(10))
+    credit_settlement_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("credit_settlements.id"), index=True)
 
 
 class RecurringTransaction(TimestampMixin, Base):

@@ -22,14 +22,17 @@ class AuthService:
         self.session = session
         self.settings = get_settings()
 
+    def _role_for_email(self, email: str) -> UserRole:
+        configured = (self.settings.admin_email or "").strip().lower()
+        return UserRole.admin if configured and configured == email else UserRole.user
+
     async def register(self, name: str, email: str, password: str) -> User:
         email = email.strip().lower()
         if not valid_password(password):
             raise HTTPException(422, "Password must be at least 10 characters and include letters and numbers")
         if await self.session.scalar(select(User.id).where(func.lower(User.email) == email)):
             raise HTTPException(409, "An account with this email already exists")
-        count = await self.session.scalar(select(func.count(User.id))) or 0
-        user = User(name=name.strip(), email=email, password_hash=hash_password(password), role=UserRole.admin if count == 0 else UserRole.user)
+        user = User(name=name.strip(), email=email, password_hash=hash_password(password), role=self._role_for_email(email))
         self.session.add(user)
         await self.session.commit()
         await self.session.refresh(user)

@@ -7,10 +7,10 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.entities import Account, Category, RecurringTransaction, Transaction
+from app.models.entities import Account, Category, CreditSettlement, RecurringTransaction, Transaction
 
 
-TABLES = [Account, Category, RecurringTransaction, Transaction]
+TABLES = [Account, Category, CreditSettlement, RecurringTransaction, Transaction]
 
 
 def json_value(value):

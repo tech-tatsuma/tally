@@ -3,9 +3,12 @@
 
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 
-type Account = { id: string; name: string; institution_name?: string; account_type: string; current_balance: number; initial_balance?: number; currency: string; description?: string };
+type Account = { id: string; name: string; institution_name?: string; account_type: string; current_balance: number; initial_balance?: number; currency: string; description?: string; credit_payment_day?: number | null; credit_payment_account_id?: string | null };
 type Category = { id: string; name: string; type: "income" | "expense"; color?: string };
-type Transaction = { id: string; account_id: string; category_id?: string; type: "income" | "expense" | "transfer"; amount: number; occurred_at: string; title: string; description?: string; journal?: string; transfer_direction?: string };
+type Transaction = { id: string; account_id: string; category_id?: string; type: "income" | "expense" | "transfer"; amount: number; occurred_at: string; title: string; description?: string; journal?: string; transfer_direction?: string; credit_settlement_id?: string | null };
+type CreditSettlement = { id: string; credit_account_id: string; payment_account_id: string; period_key: string; amount: number; settled_on: string };
+const accountTypeLabel: Record<string, string> = { bank: "銀行", cash: "現金", wallet: "電子マネー", investment: "投資", credit: "クレジットカード", other: "その他" };
+const typeLabel = (type: string) => accountTypeLabel[type] || type;
 type Recurring = { id: string; account_id: string; category_id?: string; type: "income" | "expense"; amount: number; title: string; description?: string; journal_template?: string; frequency: "monthly" | "yearly"; start_date?: string; end_date?: string; execution_day: number; next_execution_date: string; enabled: boolean };
 type User = { id: string; name: string; email: string; role: "admin" | "user"; is_active: boolean; timezone: string; currency: string; created_at: string };
 type ApiToken = { id: string; name: string; token_prefix: string; last_used_at?: string; expires_at?: string; created_at: string };
@@ -15,6 +18,39 @@ const apiFetch = (input: string, init: RequestInit = {}) => fetch(input, { ...in
 
 const money = (value: number | string) => new Intl.NumberFormat("ja-JP", { style: "currency", currency: "JPY", maximumFractionDigits: 0 }).format(Number(value));
 const shortDate = (value: string) => new Intl.DateTimeFormat("ja-JP", { month: "short", day: "numeric", weekday: "short" }).format(new Date(value));
+const compactYen = (value: number) => {
+  const rounded = Math.round(value);
+  if (Math.abs(rounded) >= 10000) return `${Math.round(rounded / 10000)}万`;
+  return rounded.toLocaleString("ja-JP");
+};
+const formatPct = (value: number) => {
+  const rounded = Math.round(value * 10) / 10;
+  return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1);
+};
+const monthWindow = (offset: number) => {
+  const now = new Date();
+  return { start: new Date(now.getFullYear(), now.getMonth() + offset, 1), end: new Date(now.getFullYear(), now.getMonth() + offset + 1, 1) };
+};
+const inRange = (value: string, start: Date, end: Date) => { const at = new Date(value); return at >= start && at < end; };
+const signedImpact = (t: Transaction) => t.type === "income" || t.transfer_direction === "credit" ? Number(t.amount) : t.type === "expense" || t.transfer_direction === "debit" ? -Number(t.amount) : 0;
+const assetsAt = (accounts: Account[], transactions: Transaction[], at: Date, accountId?: string) => {
+  const current = accounts.filter((a) => !accountId || a.id === accountId).reduce((n, a) => n + Number(a.current_balance), 0);
+  return current - transactions.filter((t) => new Date(t.occurred_at) > at && (!accountId || t.account_id === accountId)).reduce((n, t) => n + signedImpact(t), 0);
+};
+const monthlySeries = (accounts: Account[], transactions: Transaction[], count: number, accountId?: string) => {
+  const now = new Date();
+  return Array.from({ length: count }, (_, index) => {
+    const monthsAgo = count - 1 - index;
+    const at = monthsAgo === 0 ? now : new Date(now.getFullYear(), now.getMonth() - monthsAgo + 1, 0, 23, 59, 59, 999);
+    return { label: `${at.getMonth() + 1}月`, value: assetsAt(accounts, transactions, at, accountId) };
+  });
+};
+const compareNote = (current: number, previous: number) => {
+  if (current === 0 && previous === 0) return "先月・今月とも記録なし";
+  if (previous === 0) return "先月は記録なし";
+  const pct = ((current - previous) / Math.abs(previous)) * 100;
+  return `${current >= previous ? "↑" : "↓"} ${pct > 0 ? "+" : ""}${formatPct(pct)}% 先月比`;
+};
 const nav = [
   ["/dashboard", "⌂", "ホーム"], ["/transactions", "↕", "取引"], ["/accounts", "▣", "口座"], ["/recurring", "↻", "定期"], ["/analytics", "⌁", "分析"], ["/settings", "⚙", "設定"],
 ];
@@ -61,7 +97,7 @@ function AuthScreen({ notice, authenticated }: { notice: string; authenticated: 
     } catch (error) { setMessage(error instanceof Error ? error.message : "処理を完了できませんでした"); } finally { setBusy(false); }
   };
   const changeMode = (next: typeof mode) => { setMode(next); setMessage(""); history.replaceState({}, "", next === "reset" ? "/reset-password" : "/"); };
-  return <div className="auth-shell"><section className="auth-intro"><div className="auth-brand"><span className="brand-mark">t</span><span>tally</span></div><p className="eyebrow">MONEY & MOMENTS</p><h1>お金と今日を、<br/>ひとつに。</h1><p>家計、資産、日々の記録を、あなた専用の安全なスペースで管理できます。</p><ul><li>ユーザーごとにデータを完全分離</li><li>30日間有効な安全なログイン</li><li>パスワード再設定に対応</li></ul></section><section className="auth-panel"><form className="auth-card" onSubmit={submit}><p className="eyebrow">SECURE ACCOUNT</p><h2>{mode === "register" ? "アカウントを作成" : mode === "forgot" ? "パスワードをお忘れですか？" : mode === "reset" ? "新しいパスワードを設定" : "ログイン"}</h2><p className="auth-description">{mode === "register" ? "最初の登録者は管理者になります。" : mode === "forgot" ? "登録したメールアドレスへ再設定リンクを送ります。" : mode === "reset" ? "10文字以上で、英字と数字を含めてください。" : "登録済みのメールアドレスとパスワードを入力してください。"}</p>{message && <div className="auth-message" role="status">{message}</div>}{mode === "register" && <label><span>お名前</span><input name="name" autoComplete="name" required /></label>}{mode !== "reset" && <label><span>メールアドレス</span><input name="email" type="email" autoComplete="email" required /></label>}{mode !== "forgot" && <label><span>{mode === "reset" ? "新しいパスワード" : "パスワード"}</span><input name="password" type="password" minLength={mode === "login" ? 1 : 10} autoComplete={mode === "login" ? "current-password" : "new-password"} required /></label>}{mode === "reset" && <><label><span>パスワード（確認）</span><input name="confirm_password" type="password" minLength={10} autoComplete="new-password" required /></label><label><span>再設定トークン</span><input value={resetToken} onChange={(e) => setResetToken(e.target.value)} required /></label></>}{mode === "login" && <label className="remember-row"><input type="checkbox" name="remember_me" defaultChecked/><span>この端末でログイン状態を保持する（30日間）</span></label>}<button className="primary auth-submit" disabled={busy}>{busy ? "処理中…" : mode === "register" ? "アカウントを作成" : mode === "forgot" ? "再設定メールを送る" : mode === "reset" ? "パスワードを更新" : "ログイン"}</button><div className="auth-links">{mode === "login" && <><button type="button" onClick={() => changeMode("forgot")}>パスワードを忘れた</button><button type="button" onClick={() => changeMode("register")}>新規アカウント作成</button></>}{mode !== "login" && <button type="button" onClick={() => changeMode("login")}>ログインへ戻る</button>}</div></form></section></div>;
+  return <div className="auth-shell"><section className="auth-intro"><div className="auth-brand"><span className="brand-mark">t</span><span>tally</span></div><p className="eyebrow">MONEY & MOMENTS</p><h1>お金と今日を、<br/>ひとつに。</h1><p>家計、資産、日々の記録を、あなた専用の安全なスペースで管理できます。</p><ul><li>ユーザーごとにデータを完全分離</li><li>30日間有効な安全なログイン</li><li>パスワード再設定に対応</li></ul></section><section className="auth-panel"><form className="auth-card" onSubmit={submit}><p className="eyebrow">SECURE ACCOUNT</p><h2>{mode === "register" ? "アカウントを作成" : mode === "forgot" ? "パスワードをお忘れですか？" : mode === "reset" ? "新しいパスワードを設定" : "ログイン"}</h2><p className="auth-description">{mode === "register" ? "メールアドレスとパスワードでアカウントを作成します。パスワードは10文字以上で、英字と数字を含めてください。" : mode === "forgot" ? "登録したメールアドレスへ再設定リンクを送ります。" : mode === "reset" ? "10文字以上で、英字と数字を含めてください。" : "登録済みのメールアドレスとパスワードを入力してください。"}</p>{message && <div className="auth-message" role="status">{message}</div>}{mode === "register" && <label><span>お名前</span><input name="name" autoComplete="name" required /></label>}{mode !== "reset" && <label><span>メールアドレス</span><input name="email" type="email" autoComplete="email" required /></label>}{mode !== "forgot" && <label><span>{mode === "reset" ? "新しいパスワード" : "パスワード"}</span><input name="password" type="password" minLength={mode === "login" ? 1 : 10} autoComplete={mode === "login" ? "current-password" : "new-password"} required /></label>}{mode === "reset" && <><label><span>パスワード（確認）</span><input name="confirm_password" type="password" minLength={10} autoComplete="new-password" required /></label><label><span>再設定トークン</span><input value={resetToken} onChange={(e) => setResetToken(e.target.value)} required /></label></>}{mode === "login" && <label className="remember-row"><input type="checkbox" name="remember_me" defaultChecked/><span>この端末でログイン状態を保持する（30日間）</span></label>}<button className="primary auth-submit" disabled={busy}>{busy ? "処理中…" : mode === "register" ? "アカウントを作成" : mode === "forgot" ? "再設定メールを送る" : mode === "reset" ? "パスワードを更新" : "ログイン"}</button><div className="auth-links">{mode === "login" && <><button type="button" onClick={() => changeMode("forgot")}>パスワードを忘れた</button><button type="button" onClick={() => changeMode("register")}>新規アカウント作成</button></>}{mode !== "login" && <button type="button" onClick={() => changeMode("login")}>ログインへ戻る</button>}</div></form></section></div>;
 }
 
 export function WalletApp() {
@@ -133,17 +169,27 @@ function PageHeader({ eyebrow, title, action }: { eyebrow?: string; title: strin
 }
 
 function Dashboard({ accounts, categories, transactions, go }: PageProps) {
+  const thisMonth = monthWindow(0); const lastMonth = monthWindow(-1);
+  const monthTx = transactions.filter((t) => inRange(t.occurred_at, thisMonth.start, thisMonth.end));
+  const lastTx = transactions.filter((t) => inRange(t.occurred_at, lastMonth.start, lastMonth.end));
+  const monthIncome = monthTx.filter((t) => t.type === "income").reduce((n, t) => n + Number(t.amount), 0);
+  const monthExpense = monthTx.filter((t) => t.type === "expense").reduce((n, t) => n + Number(t.amount), 0);
+  const lastIncome = lastTx.filter((t) => t.type === "income").reduce((n, t) => n + Number(t.amount), 0);
+  const lastExpense = lastTx.filter((t) => t.type === "expense").reduce((n, t) => n + Number(t.amount), 0);
   const assets = accounts.reduce((n, a) => n + Number(a.current_balance), 0);
-  const monthIncome = transactions.filter((t) => t.type === "income").reduce((n, t) => n + Number(t.amount), 0);
-  const monthExpense = transactions.filter((t) => t.type === "expense").reduce((n, t) => n + Number(t.amount), 0);
+  const lastAssets = assetsAt(accounts, transactions, new Date(thisMonth.start.getTime() - 1));
+  const assetDeltaPct = lastAssets === 0 ? null : ((assets - lastAssets) / Math.abs(lastAssets)) * 100;
+  const savingsRate = monthIncome ? Math.round(((monthIncome - monthExpense) / monthIncome) * 100) : null;
+  const series = accounts.length ? monthlySeries(accounts, transactions, 7) : [];
+  const sixMonthDelta = series.length ? series[series.length - 1].value - series[0].value : 0;
   return <div className="page dashboard-page">
     <PageHeader eyebrow={new Intl.DateTimeFormat("ja-JP", { dateStyle: "full" }).format(new Date())} title="今日のお金を確認しましょう" action={<button className="primary" onClick={() => go("/transactions/new")}>＋ 取引を追加</button>} />
-    <section className="asset-hero"><div><p>現在の総資産</p><strong>{money(assets)}</strong><span className="positive">↑ 5.2% <small>先月比</small></span></div><MiniLine /></section>
-    <section className="metric-grid"><Metric label="今月の収入" value={money(monthIncome)} note="先月と同程度" tone="income" /><Metric label="今月の支出" value={money(monthExpense)} note="予算の 42%" tone="expense" /><Metric label="今月の収支" value={money(monthIncome - monthExpense)} note="貯蓄率 71%" tone="balance" /></section>
+    <section className="asset-hero"><div><p>現在の総資産</p><strong>{money(assets)}</strong>{accounts.length ? assetDeltaPct === null ? <span className="neutral">先月比の比較対象がありません</span> : <span className={assetDeltaPct >= 0 ? "positive" : "negative"}>{assetDeltaPct >= 0 ? "↑" : "↓"} {assetDeltaPct > 0 ? "+" : ""}{formatPct(assetDeltaPct)}% <small>先月比</small></span> : <span className="neutral">口座を追加すると表示されます</span>}</div>{accounts.length ? <MiniLine values={monthlySeries(accounts, transactions, 10).map((p) => p.value)} /> : null}</section>
+    <section className="metric-grid"><Metric label="今月の収入" value={money(monthIncome)} note={compareNote(monthIncome, lastIncome)} tone="income" /><Metric label="今月の支出" value={money(monthExpense)} note={compareNote(monthExpense, lastExpense)} tone="expense" /><Metric label="今月の収支" value={money(monthIncome - monthExpense)} note={savingsRate === null ? "収入がないため貯蓄率は算出できません" : `貯蓄率 ${savingsRate}%`} tone="balance" /></section>
     <div className="dashboard-grid">
-      <section className="panel span-2"><SectionHead title="資産の推移" link="詳しく見る" onClick={() => go("/analytics")} /><div className="trend-summary"><strong>{money(assets)}</strong><span className="positive">＋{money(126400)}（6ヶ月）</span></div><AssetChart /></section>
-      <section className="panel accounts-panel"><SectionHead title="口座別残高" link="口座を管理" onClick={() => go("/accounts")} /><div className="account-list">{accounts.map((a, i) => <button key={a.id} onClick={() => go(`/accounts/${a.id}`)}><span className={`account-icon icon-${i}`}>{a.name[0]}</span><span><strong>{a.name}</strong><small>{a.institution_name || a.account_type}</small></span><b>{money(a.current_balance)}</b></button>)}</div></section>
-      <section className="panel span-2"><SectionHead title="最近の取引" link="すべて見る" onClick={() => go("/transactions")} /><TransactionList items={transactions.slice(0, 5)} accounts={accounts} categories={categories} onClick={() => go("/transactions")} /></section>
+      <section className="panel span-2"><SectionHead title="資産の推移" link="詳しく見る" onClick={() => go("/analytics")} /><div className="trend-summary"><strong>{money(assets)}</strong>{series.length ? <span className={sixMonthDelta > 0 ? "positive" : sixMonthDelta < 0 ? "negative" : "neutral"}>{sixMonthDelta === 0 ? "この期間の変化はありません" : `${sixMonthDelta > 0 ? "＋" : "−"}${money(Math.abs(sixMonthDelta))}（6ヶ月）`}</span> : null}</div><AssetChart series={series} empty="口座を追加すると推移が表示されます" /></section>
+      <section className="panel accounts-panel"><SectionHead title="口座別残高" link="口座を管理" onClick={() => go("/accounts")} /><div className="account-list">{accounts.length ? accounts.map((a, i) => <button key={a.id} onClick={() => go(`/accounts/${a.id}`)}><span className={`account-icon icon-${i}`}>{a.name[0]}</span><span><strong>{a.name}</strong><small>{a.institution_name || typeLabel(a.account_type)}</small></span><b>{money(a.current_balance)}</b></button>) : <p className="empty-inline">まだ口座がありません</p>}</div></section>
+      <section className="panel span-2"><SectionHead title="最近の取引" link="すべて見る" onClick={() => go("/transactions")} />{transactions.length ? <TransactionList items={transactions.slice(0, 5)} accounts={accounts} categories={categories} onClick={() => go("/transactions")} /> : <p className="empty-inline">まだ取引がありません</p>}</section>
       <section className="panel journal-card"><p className="eyebrow">TODAY&apos;S NOTE</p><h2>お金と一緒に、今日を残す</h2><p>取引の記録には、その日の出来事や気持ちも書き残せます。</p><button className="secondary" onClick={() => go("/transactions/new")}>今日の記録を書く →</button></section>
     </div>
   </div>;
@@ -152,9 +198,21 @@ function Dashboard({ accounts, categories, transactions, go }: PageProps) {
 function Metric({ label, value, note, tone }: { label: string; value: string; note: string; tone: string }) { return <div className={`metric ${tone}`}><span>{label}</span><strong>{value}</strong><small>{note}</small></div>; }
 function SectionHead({ title, link, onClick }: { title: string; link?: string; onClick?: () => void }) { return <div className="section-head"><h2>{title}</h2>{link && <button onClick={onClick}>{link} →</button>}</div>; }
 
-function MiniLine() { return <div className="mini-bars" aria-label="直近の資産は増加傾向">{[30, 38, 34, 48, 52, 61, 58, 75, 80, 94].map((h, i) => <i key={i} style={{ height: `${h}%` }} />)}</div>; }
-function AssetChart() {
-  return <div className="chart-wrap"><div className="chart-y"><span>250万</span><span>230万</span><span>210万</span><span>190万</span></div><svg viewBox="0 0 700 180" role="img" aria-label="2月から8月にかけて総資産が増加"><defs><linearGradient id="area" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stopColor="#00c4cc" stopOpacity=".28"/><stop offset="1" stopColor="#00c4cc" stopOpacity="0"/></linearGradient></defs><path className="area" d="M0,150 C70,145 80,125 140,130 S230,98 280,108 S370,75 420,82 S500,62 560,65 S640,25 700,30 L700,180 L0,180Z"/><path className="line" d="M0,150 C70,145 80,125 140,130 S230,98 280,108 S370,75 420,82 S500,62 560,65 S640,25 700,30"/></svg><div className="chart-x"><span>2月</span><span>3月</span><span>4月</span><span>5月</span><span>6月</span><span>7月</span><span>8月</span></div></div>;
+function MiniLine({ values }: { values: number[] }) {
+  const max = Math.max(0, ...values);
+  return <div className="mini-bars" aria-label="直近の資産推移">{values.map((value, i) => <i key={i} style={{ height: `${max <= 0 ? 8 : Math.max(8, (value / max) * 100)}%` }} />)}</div>;
+}
+function AssetChart({ series, empty }: { series: { label: string; value: number }[]; empty: string }) {
+  if (!series.length) return <p className="empty-chart">{empty}</p>;
+  const values = series.map((p) => p.value);
+  const min = Math.min(0, ...values); const max = Math.max(...values, 0);
+  const pad = max === min ? Math.max(1000, Math.abs(max) * 0.1 || 1000) : 0;
+  const lo = min - pad; const hi = max + pad; const span = hi - lo || 1;
+  const yOf = (value: number) => 170 - ((value - lo) / span) * 160;
+  const xOf = (index: number) => series.length === 1 ? 350 : (index / (series.length - 1)) * 700;
+  const coords = series.map((point, index) => `${xOf(index)},${yOf(point.value)}`);
+  const line = `M${coords.join(" L")}`;
+  return <div className="chart-wrap"><div className="chart-y">{[hi, hi - span / 3, lo + span / 3, lo].map((tick, i) => <span key={i}>{compactYen(tick)}</span>)}</div><svg viewBox="0 0 700 180" role="img" aria-label="資産の推移"><defs><linearGradient id="area" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stopColor="#00c4cc" stopOpacity=".28"/><stop offset="1" stopColor="#00c4cc" stopOpacity="0"/></linearGradient></defs><path className="area" d={`${line} L${xOf(series.length - 1)},180 L0,180 Z`} /><path className="line" d={line} /></svg><div className="chart-x">{series.map((point, index) => <span key={`${point.label}-${index}`}>{point.label}</span>)}</div></div>;
 }
 
 function TransactionList({ items, accounts, categories, onClick }: { items: Transaction[]; accounts: Account[]; categories: Category[]; onClick?: (t: Transaction) => void }) {
@@ -189,17 +247,56 @@ function TransactionForm({ accounts, categories, setTransactions, go, notify, co
 
 function Accounts({ accounts, setAccounts, go, notify, connected }: PageProps) {
   const [open, setOpen] = useState(false);
-  const submit = async (e: FormEvent<HTMLFormElement>) => { e.preventDefault(); const fd = new FormData(e.currentTarget); let item: Account = { id: crypto.randomUUID(), name: String(fd.get("name")), account_type: String(fd.get("account_type")), current_balance: Number(fd.get("initial_balance")), currency: "JPY", institution_name: String(fd.get("institution_name") || "") }; if (connected) { const r = await apiFetch(`${API}/accounts`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...item, initial_balance: item.current_balance }) }); item = await r.json(); } setAccounts((all) => [...all, item]); setOpen(false); notify("口座を追加しました"); };
-  return <div className="page"><PageHeader eyebrow="MY ASSETS" title="口座" action={<button className="primary" onClick={() => setOpen(true)}>＋ 口座を追加</button>} /><div className="account-summary"><span>総資産</span><strong>{money(accounts.reduce((n, a) => n + Number(a.current_balance), 0))}</strong><small>{accounts.length}口座</small></div><div className="account-cards">{accounts.map((a, i) => <button key={a.id} className="account-card panel" onClick={() => go(`/accounts/${a.id}`)}><span className={`account-icon large icon-${i}`}>{a.name[0]}</span><span><small>{a.institution_name || a.account_type}</small><h2>{a.name}</h2></span><strong>{money(a.current_balance)}</strong><em>詳細を見る →</em></button>)}</div>{open && <Modal title="口座を追加" close={() => setOpen(false)}><form onSubmit={submit} className="modal-form"><label><span>口座名</span><input required name="name" placeholder="例：生活口座" /></label><label><span>金融機関名</span><input name="institution_name" placeholder="例：みらい銀行" /></label><label><span>口座タイプ</span><select name="account_type"><option value="bank">銀行</option><option value="cash">現金</option><option value="wallet">電子マネー</option><option value="investment">投資</option><option value="other">その他</option></select></label><label><span>初期残高</span><input required name="initial_balance" type="number" min="0" defaultValue="0" /></label><button className="primary">追加する</button></form></Modal>}</div>;
+  const [accountType, setAccountType] = useState("bank");
+  const paymentCandidates = accounts.filter((a) => a.account_type !== "credit");
+  const submit = async (e: FormEvent<HTMLFormElement>) => {
+    e.preventDefault(); const fd = new FormData(e.currentTarget);
+    const isCredit = accountType === "credit";
+    const payload = { name: fd.get("name"), account_type: accountType, institution_name: fd.get("institution_name") || null, initial_balance: fd.get("initial_balance"), credit_payment_day: isCredit ? Number(fd.get("credit_payment_day")) : null, credit_payment_account_id: isCredit ? fd.get("credit_payment_account_id") : null };
+    let item: Account = { id: crypto.randomUUID(), name: String(payload.name), account_type: accountType, current_balance: Number(payload.initial_balance), currency: "JPY", institution_name: String(payload.institution_name || ""), credit_payment_day: payload.credit_payment_day, credit_payment_account_id: payload.credit_payment_account_id as string | null };
+    try {
+      if (connected) { const r = await apiFetch(`${API}/accounts`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) }); if (!r.ok) throw new Error(await r.text()); item = await r.json(); }
+      setAccounts((all) => [...all, item]); setOpen(false); setAccountType("bank"); notify("口座を追加しました");
+    } catch { notify("口座を追加できませんでした。入力内容を確認してください"); }
+  };
+  return <div className="page"><PageHeader eyebrow="MY ASSETS" title="口座" action={<button className="primary" onClick={() => setOpen(true)}>＋ 口座を追加</button>} /><div className="account-summary"><span>総資産</span><strong>{money(accounts.reduce((n, a) => n + Number(a.current_balance), 0))}</strong><small>{accounts.length}口座</small></div><div className="account-cards">{accounts.map((a, i) => <button key={a.id} className="account-card panel" onClick={() => go(`/accounts/${a.id}`)}><span className={`account-icon large icon-${i}`}>{a.name[0]}</span><span><small>{a.institution_name || typeLabel(a.account_type)}</small><h2>{a.name}</h2></span><strong>{money(a.current_balance)}</strong><em>詳細を見る →</em></button>)}</div>{open && <Modal title="口座を追加" close={() => setOpen(false)}><form onSubmit={submit} className="modal-form"><label><span>口座名</span><input required name="name" placeholder="例：生活口座" /></label><label><span>金融機関名</span><input name="institution_name" placeholder="例：みらい銀行" /></label><label><span>口座タイプ</span><select name="account_type" value={accountType} onChange={(e) => setAccountType(e.target.value)}><option value="bank">銀行</option><option value="cash">現金</option><option value="wallet">電子マネー</option><option value="investment">投資</option><option value="credit">クレジットカード</option><option value="other">その他</option></select></label><label><span>初期残高</span><input required name="initial_balance" type="number" min="0" defaultValue="0" /></label>{accountType === "credit" && <><p className="form-help">クレジットカードとして登録すると、毎月の支払日に利用額を指定の口座から自動で引き落とします。あとから設定することもできます。</p><div className="inline-fields"><label><span>支払日</span><input name="credit_payment_day" type="number" min="1" max="31" defaultValue="27" required={accountType === "credit"} /></label><label><span>引き落とし元口座</span><select name="credit_payment_account_id" required={accountType === "credit"} defaultValue={paymentCandidates[0]?.id}>{paymentCandidates.length ? paymentCandidates.map((c) => <option key={c.id} value={c.id}>{c.name}</option>) : <option value="">先に引き落とし元の口座を作成してください</option>}</select></label></div></>}<button className="primary" disabled={accountType === "credit" && !paymentCandidates.length}>追加する</button></form></Modal>}</div>;
 }
 
 function AccountDetail({ id, accounts, categories, transactions, setAccounts, go, notify, connected }: PageProps & { id: string }) {
   const [editing, setEditing] = useState(false);
-  const account = accounts.find((a) => a.id === id); if (!account) return <div className="page empty"><h1>口座が見つかりません</h1><button onClick={() => go("/accounts")}>口座一覧へ</button></div>;
+  const [editType, setEditType] = useState("bank");
+  const [settlements, setSettlements] = useState<CreditSettlement[]>([]);
+  const account = accounts.find((a) => a.id === id);
+  useEffect(() => {
+    const request = account && account.account_type === "credit" && connected ? apiFetch(`${API}/accounts/${account.id}/credit-settlements`).then((r) => r.ok ? r.json() : []) : Promise.resolve([]);
+    request.then(setSettlements).catch(() => setSettlements([]));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [account?.id, account?.account_type, connected]);
+  if (!account) return <div className="page empty"><h1>口座が見つかりません</h1><button onClick={() => go("/accounts")}>口座一覧へ</button></div>;
   const items = transactions.filter((t) => t.account_id === id);
-  const save = async (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); const fd = new FormData(event.currentTarget); const payload = { name: fd.get("name"), institution_name: fd.get("institution_name") || null, description: fd.get("description") || null }; try { let updated = { ...account, ...payload } as Account; if (connected) { const response = await apiFetch(`${API}/accounts/${account.id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) }); if (!response.ok) throw new Error(); updated = await response.json(); } setAccounts((all) => all.map((item) => item.id === account.id ? updated : item)); setEditing(false); notify("口座情報を更新しました"); } catch { notify("口座情報を更新できませんでした"); } };
+  const series = monthlySeries(accounts, transactions, 7, id);
+  const sixMonthDelta = series.length ? series[series.length - 1].value - series[0].value : 0;
+  const paymentAccount = accounts.find((a) => a.id === account.credit_payment_account_id);
+  const unsettled = items.filter((t) => (t.type === "expense" || t.type === "income") && !t.credit_settlement_id).reduce((n, t) => n + (t.type === "expense" ? Number(t.amount) : -Number(t.amount)), 0);
+  const paymentCandidates = accounts.filter((a) => a.account_type !== "credit" && a.id !== account.id);
+  const openEdit = () => { setEditType(account.account_type); setEditing(true); };
+  const save = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault(); const fd = new FormData(event.currentTarget);
+    const autoPayEnabled = editType === "credit" && !!fd.get("credit_payment_account_id");
+    const payload = { name: fd.get("name"), account_type: editType, institution_name: fd.get("institution_name") || null, description: fd.get("description") || null, credit_payment_day: autoPayEnabled ? Number(fd.get("credit_payment_day")) : null, credit_payment_account_id: autoPayEnabled ? fd.get("credit_payment_account_id") : null };
+    try {
+      let updated = { ...account, ...payload } as Account; if (connected) { const response = await apiFetch(`${API}/accounts/${account.id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) }); if (!response.ok) throw new Error(); updated = await response.json(); }
+      setAccounts((all) => all.map((item) => item.id === account.id ? updated : item)); setEditing(false); notify("口座情報を更新しました");
+    } catch { notify("口座情報を更新できませんでした。入力内容を確認してください"); }
+  };
   const remove = async () => { if (!confirm(`「${account.name}」を削除しますか？取引履歴は残ります。`)) return; try { if (connected) { const response = await apiFetch(`${API}/accounts/${account.id}`, { method: "DELETE" }); if (!response.ok) throw new Error(); } setAccounts((all) => all.filter((item) => item.id !== account.id)); notify("口座を削除しました"); go("/accounts"); } catch { notify("口座を削除できませんでした"); } };
-  return <div className="page"><button className="back-link" onClick={() => go("/accounts")}>← 口座一覧へ</button><PageHeader eyebrow={account.institution_name || account.account_type} title={account.name} action={<div className="header-actions"><button className="secondary" onClick={() => setEditing(true)}>口座を編集</button><button className="danger-link" onClick={remove}>削除</button></div>} /><section className="account-detail-hero"><span>現在残高</span><strong>{money(account.current_balance)}</strong><small>取引履歴から自動計算</small></section><div className="account-detail-grid"><section className="panel span-2"><SectionHead title="残高の推移" /><AssetChart /></section><section className="panel span-2"><SectionHead title="この口座の取引" /><TransactionList items={items} accounts={accounts} categories={categories} /></section></div>{editing && <Modal title="口座を編集" close={() => setEditing(false)}><form className="modal-form" onSubmit={save}><label><span>口座名</span><input required name="name" defaultValue={account.name} /></label><label><span>金融機関名</span><input name="institution_name" defaultValue={account.institution_name || ""} /></label><label><span>説明</span><textarea name="description" rows={3} defaultValue={account.description || ""} /></label><div className="modal-actions"><button type="button" className="secondary" onClick={() => setEditing(false)}>キャンセル</button><button className="primary">変更を保存</button></div></form></Modal>}</div>;
+  return <div className="page"><button className="back-link" onClick={() => go("/accounts")}>← 口座一覧へ</button><PageHeader eyebrow={account.institution_name || typeLabel(account.account_type)} title={account.name} action={<div className="header-actions"><button className="secondary" onClick={openEdit}>口座を編集</button><button className="danger-link" onClick={remove}>削除</button></div>} /><section className="account-detail-hero"><span>現在残高</span><strong>{money(account.current_balance)}</strong><small>取引履歴から自動計算</small></section>
+    {account.account_type === "credit" && <section className="info-banner"><span>💳</span><p>{account.credit_payment_day && paymentAccount ? <><strong>毎月{account.credit_payment_day}日に「{paymentAccount.name}」から自動引き落とし</strong><br/>未精算の利用額：{money(Math.max(0, unsettled))}{unsettled < 0 && "（次回の請求から差し引かれます）"}</> : <><strong>自動引き落としが未設定です</strong><br/>「口座を編集」から支払日と引き落とし元口座を設定すると、毎月自動で精算されます。取引の入力が遅れても、次回の引き落としで自動的にまとめて精算されます。</>}</p></section>}
+    <div className="account-detail-grid"><section className="panel span-2"><SectionHead title="残高の推移" /><div className="trend-summary"><strong>{money(account.current_balance)}</strong><span className={sixMonthDelta > 0 ? "positive" : sixMonthDelta < 0 ? "negative" : "neutral"}>{sixMonthDelta === 0 ? "この期間の変化はありません" : `${sixMonthDelta > 0 ? "＋" : "−"}${money(Math.abs(sixMonthDelta))}（6ヶ月）`}</span></div><AssetChart series={series} empty="取引を追加すると推移が表示されます" /></section>
+      {account.account_type === "credit" && <section className="panel"><SectionHead title="自動引き落とし履歴" /><div className="token-list">{settlements.length ? settlements.map((s) => <div key={s.id}><span><strong>{s.period_key}分の引き落とし</strong><small>{s.settled_on.replaceAll("-", "/")}</small></span><b>{money(s.amount)}</b></div>) : <p className="muted-text">まだ引き落としの実行履歴はありません</p>}</div></section>}
+      <section className="panel span-2"><SectionHead title="この口座の取引" /><TransactionList items={items} accounts={accounts} categories={categories} /></section></div>
+    {editing && <Modal title="口座を編集" close={() => setEditing(false)}><form className="modal-form" onSubmit={save}><label><span>口座名</span><input required name="name" defaultValue={account.name} /></label><label><span>金融機関名</span><input name="institution_name" defaultValue={account.institution_name || ""} /></label><label><span>口座タイプ</span><select name="account_type" value={editType} onChange={(e) => setEditType(e.target.value)}><option value="bank">銀行</option><option value="cash">現金</option><option value="wallet">電子マネー</option><option value="investment">投資</option><option value="credit">クレジットカード</option><option value="other">その他</option></select></label>{editType === "credit" && <div className="inline-fields"><label><span>支払日</span><input name="credit_payment_day" type="number" min="1" max="31" defaultValue={account.credit_payment_day || 27} /></label><label><span>引き落とし元口座</span><select name="credit_payment_account_id" defaultValue={account.credit_payment_account_id || paymentCandidates[0]?.id || ""}><option value="">未設定（自動引き落としを行わない）</option>{paymentCandidates.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}</select></label></div>}<label><span>説明</span><textarea name="description" rows={3} defaultValue={account.description || ""} /></label><div className="modal-actions"><button type="button" className="secondary" onClick={() => setEditing(false)}>キャンセル</button><button className="primary">変更を保存</button></div></form></Modal>}
+  </div>;
 }
 
 function RecurringPage({ recurring, accounts, categories, setRecurring, notify, connected }: PageProps) {
