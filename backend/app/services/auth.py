@@ -36,14 +36,7 @@ class AuthService:
         user = User(name=name.strip(), email=email, password_hash=hash_password(password), role=self._role_for_email(email))
         self.session.add(user)
         await self.session.flush()
-        # Every household starts with a place to record the cash it carries.
-        self.session.add(Account(
-            user_id=user.id,
-            name="お財布",
-            account_type=AccountType.cash,
-            initial_balance=Decimal("0"),
-            currency=user.currency,
-        ))
+        self.session.add(Account(user_id=user.id, name="現金", account_type=AccountType.cash, initial_balance=Decimal("0"), currency=user.currency))
         await self.session.commit()
         await self.session.refresh(user)
         return user

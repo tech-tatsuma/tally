@@ -18,7 +18,7 @@ test("server-renders the authenticated application shell", async () => {
   assert.equal(response.status, 200);
   assert.match(response.headers.get("content-type") ?? "", /^text\/html\b/i);
   const html = await response.text();
-  assert.match(html, /<title>tally — お金と今日を記録する<\/title>/i);
+  assert.match(html, /<title>tally — 今日の残高を、楽しみに開く<\/title>/i);
   assert.match(html, /安全なセッションを確認しています/);
   assert.match(html, /class="auth-shell"/);
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton/i);
