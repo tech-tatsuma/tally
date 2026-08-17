@@ -31,6 +31,7 @@ type Transaction = {
   title: string;
   description?: string;
   journal?: string;
+  transfer_group_id?: string | null;
   transfer_direction?: string;
   credit_settlement_id?: string | null;
 };
@@ -155,6 +156,38 @@ const signedImpact = (t: Transaction) =>
     : t.type === "expense" || t.transfer_direction === "debit"
       ? -Number(t.amount)
       : 0;
+const applyAccountImpact = (
+  accounts: Account[],
+  txs: Transaction[],
+  sign: 1 | -1,
+) => {
+  const deltas = new Map<string, number>();
+  for (const t of txs) {
+    deltas.set(
+      t.account_id,
+      (deltas.get(t.account_id) || 0) + sign * signedImpact(t),
+    );
+  }
+  return accounts.map((a) =>
+    deltas.has(a.id)
+      ? {
+          ...a,
+          current_balance: Number(a.current_balance) + (deltas.get(a.id) || 0),
+        }
+      : a,
+  );
+};
+const relatedTransactions = (all: Transaction[], t: Transaction) =>
+  t.transfer_group_id
+    ? all.filter(
+        (x) => x.id === t.id || x.transfer_group_id === t.transfer_group_id,
+      )
+    : [t];
+async function fetchAccounts(): Promise<Account[]> {
+  const response = await apiFetch(`${API}/accounts`);
+  if (!response.ok) throw new Error("accounts");
+  return response.json();
+}
 const assetsAt = (
   accounts: Account[],
   transactions: Transaction[],
@@ -1186,6 +1219,7 @@ function Transactions({
   categories,
   transactions,
   setTransactions,
+  setAccounts,
   go,
   notify,
   connected,
@@ -1200,11 +1234,29 @@ function Transactions({
   );
   const remove = async (t: Transaction) => {
     if (!confirm(`「${t.title}」を削除しますか？`)) return;
-    if (connected)
-      await apiFetch(`${API}/transactions/${t.id}`, { method: "DELETE" });
-    setTransactions((all) => all.filter((x) => x.id !== t.id));
-    setSelected(null);
-    notify("取引を削除しました");
+    const related = relatedTransactions(transactions, t);
+    const removedIds = new Set(related.map((x) => x.id));
+    try {
+      if (connected) {
+        const response = await apiFetch(`${API}/transactions/${t.id}`, {
+          method: "DELETE",
+        });
+        if (!response.ok) throw new Error();
+        setAccounts(await fetchAccounts());
+        if (t.type === "transfer" || t.transfer_group_id) {
+          setTransactions(await fetchAllTransactions());
+        } else {
+          setTransactions((all) => all.filter((x) => !removedIds.has(x.id)));
+        }
+      } else {
+        setAccounts((all) => applyAccountImpact(all, related, -1));
+        setTransactions((all) => all.filter((x) => !removedIds.has(x.id)));
+      }
+      setSelected(null);
+      notify("取引を削除しました");
+    } catch {
+      notify("削除できませんでした");
+    }
   };
   return (
     <div className="page">
@@ -1327,6 +1379,7 @@ function TransactionForm({
   accounts,
   categories,
   setTransactions,
+  setAccounts,
   setCategories,
   go,
   notify,
@@ -1366,8 +1419,30 @@ function TransactionForm({
         });
         if (!r.ok) throw new Error(await r.text());
         tx = await r.json();
+        setAccounts(await fetchAccounts());
+        if (kind === "transfer") {
+          setTransactions(await fetchAllTransactions());
+        } else {
+          setTransactions((all) => [tx, ...all]);
+        }
+      } else {
+        const amount = Number(payload.amount);
+        const created: Transaction[] =
+          kind === "transfer"
+            ? [
+                { ...tx, amount, transfer_direction: "debit" },
+                {
+                  ...tx,
+                  id: crypto.randomUUID(),
+                  account_id: String(payload.destination_account_id),
+                  amount,
+                  transfer_direction: "credit",
+                },
+              ]
+            : [{ ...tx, amount }];
+        setAccounts((all) => applyAccountImpact(all, created, 1));
+        setTransactions((all) => [...created, ...all]);
       }
-      setTransactions((all) => [tx, ...all]);
       notify("取引を保存しました");
       go("/transactions");
     } catch {
@@ -2000,6 +2075,7 @@ function RecurringPage({
   accounts,
   categories,
   setRecurring,
+  setCategories,
   notify,
   connected,
 }: PageProps) {
@@ -2046,7 +2122,16 @@ function RecurringPage({
         eyebrow="AUTOMATION"
         title="固定費・定期収入"
         action={
-          <button className="primary" onClick={() => setEditing("new")}>
+          <button
+            className="primary"
+            onClick={() => {
+              if (!accounts.length) {
+                notify("先に口座を追加してください");
+                return;
+              }
+              setEditing("new");
+            }}
+          >
             ＋ 定期取引を追加
           </button>
         }
