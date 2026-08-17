@@ -139,6 +139,10 @@ const formatPct = (value: number) => {
   const rounded = Math.round(value * 10) / 10;
   return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1);
 };
+const toDateInput = (value: string) =>
+  new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Tokyo" }).format(
+    new Date(value),
+  );
 const monthWindow = (offset: number) => {
   const now = new Date();
   return {
@@ -1220,6 +1224,7 @@ function Transactions({
   transactions,
   setTransactions,
   setAccounts,
+  setCategories,
   go,
   notify,
   connected,
@@ -1227,6 +1232,7 @@ function Transactions({
   const [query, setQuery] = useState("");
   const [type, setType] = useState("all");
   const [selected, setSelected] = useState<Transaction | null>(null);
+  const [editing, setEditing] = useState(false);
   const filtered = transactions.filter(
     (t) =>
       (type === "all" || t.type === type) &&
@@ -1257,6 +1263,32 @@ function Transactions({
     } catch {
       notify("削除できませんでした");
     }
+  };
+  const closeDetail = () => {
+    setEditing(false);
+    setSelected(null);
+  };
+  const startEdit = (t: Transaction) => {
+    if (t.type === "transfer") {
+      notify("振替は削除して新しく作り直してください");
+      return;
+    }
+    setEditing(true);
+  };
+  const applyEdit = async (previous: Transaction, updated: Transaction) => {
+    if (connected) {
+      setAccounts(await fetchAccounts());
+    } else {
+      setAccounts((all) =>
+        applyAccountImpact(applyAccountImpact(all, [previous], -1), [updated], 1),
+      );
+    }
+    setTransactions((all) =>
+      all.map((x) => (x.id === updated.id ? updated : x)),
+    );
+    setSelected(updated);
+    setEditing(false);
+    notify("取引を更新しました");
   };
   return (
     <div className="page">
@@ -1314,15 +1346,27 @@ function Transactions({
         />
       </section>
       {selected && (
-        <div className="drawer-backdrop" onClick={() => setSelected(null)}>
+        <div className="drawer-backdrop" onClick={closeDetail}>
           <aside className="drawer" onClick={(e) => e.stopPropagation()}>
             <button
               className="close"
               aria-label="閉じる"
-              onClick={() => setSelected(null)}
+              onClick={closeDetail}
             >
               ×
             </button>
+            {editing ? (
+              <TransactionEditor
+                item={selected}
+                categories={categories}
+                setCategories={setCategories}
+                connected={connected}
+                notify={notify}
+                close={() => setEditing(false)}
+                saved={(updated) => applyEdit(selected, updated)}
+              />
+            ) : (
+              <>
             <p className="eyebrow">TRANSACTION DETAIL</p>
             <h2>{selected.title}</h2>
             <strong
@@ -1363,15 +1407,144 @@ function Transactions({
               </div>
             )}
             <div className="drawer-actions">
-              <button className="secondary">編集</button>
+              <button
+                className="secondary"
+                onClick={() => startEdit(selected)}
+              >
+                編集
+              </button>
               <button className="danger-link" onClick={() => remove(selected)}>
                 削除
               </button>
             </div>
+              </>
+            )}
           </aside>
         </div>
       )}
     </div>
+  );
+}
+
+function TransactionEditor({
+  item,
+  categories,
+  setCategories,
+  connected,
+  notify,
+  close,
+  saved,
+}: {
+  item: Transaction;
+  categories: Category[];
+  setCategories: PageProps["setCategories"];
+  connected: boolean;
+  notify: (message: string) => void;
+  close: () => void;
+  saved: (item: Transaction) => void | Promise<void>;
+}) {
+  const [saving, setSaving] = useState(false);
+  const kind = item.type === "income" ? "income" : "expense";
+  const submit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setSaving(true);
+    const fd = new FormData(event.currentTarget);
+    const payload = {
+      category_id: fd.get("category_id"),
+      amount: fd.get("amount"),
+      occurred_at: new Date(`${fd.get("date")}T12:00:00+09:00`).toISOString(),
+      title: fd.get("title"),
+      description: fd.get("description") || null,
+      journal: fd.get("journal") || null,
+    };
+    try {
+      let updated: Transaction = {
+        ...item,
+        ...payload,
+        amount: Number(payload.amount),
+      };
+      if (connected) {
+        const response = await apiFetch(`${API}/transactions/${item.id}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        if (!response.ok) throw new Error(await response.text());
+        updated = await response.json();
+      }
+      await saved(updated);
+    } catch {
+      notify("保存できませんでした。入力内容を確認してください");
+    } finally {
+      setSaving(false);
+    }
+  };
+  const visible = categories.filter((c) => c.type === kind);
+  return (
+    <>
+      <p className="eyebrow">EDIT TRANSACTION</p>
+      <h2>取引を編集</h2>
+      <form className="modal-form" onSubmit={submit}>
+        <label>
+          <span>タイトル</span>
+          <input required name="title" defaultValue={item.title} maxLength={160} />
+        </label>
+        <div className="inline-fields">
+          <label>
+            <span>金額</span>
+            <input
+              required
+              name="amount"
+              type="number"
+              min="1"
+              step="1"
+              defaultValue={item.amount}
+            />
+          </label>
+          <label>
+            <span>日付</span>
+            <input
+              required
+              name="date"
+              type="date"
+              defaultValue={toDateInput(item.occurred_at)}
+            />
+          </label>
+        </div>
+        <CategoryField
+          type={kind}
+          categories={categories}
+          setCategories={setCategories}
+          connected={connected}
+          notify={notify}
+          selectedId={item.category_id}
+        />
+        <label>
+          <span>
+            説明 <small>任意</small>
+          </span>
+          <textarea
+            name="description"
+            rows={2}
+            defaultValue={item.description || ""}
+          />
+        </label>
+        <label>
+          <span>
+            この日の記録 <small>任意</small>
+          </span>
+          <textarea name="journal" rows={4} defaultValue={item.journal || ""} />
+        </label>
+        <div className="modal-actions">
+          <button type="button" className="secondary" onClick={close}>
+            キャンセル
+          </button>
+          <button className="primary" disabled={saving || !visible.length}>
+            {saving ? "保存中…" : "変更を保存"}
+          </button>
+        </div>
+      </form>
+    </>
   );
 }
 
