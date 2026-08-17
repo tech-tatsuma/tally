@@ -14,6 +14,10 @@ async def test_register_login_profile_and_persistent_session(session):
     user = await auth.register("Second user", "SECOND@example.com", "StrongPassword123")
     assert user.email == "second@example.com"
     assert user.role == UserRole.user
+    wallet = await session.scalar(select(Account).where(Account.user_id == user.id, Account.name == "お財布"))
+    assert wallet is not None
+    assert wallet.account_type == AccountType.cash
+    assert wallet.initial_balance == 0
     assert (await auth.authenticate("second@example.com", "StrongPassword123")).id == user.id
     raw, login = await auth.create_session(user, remember_me=True)
     assert raw.startswith("tlly_sess_")
@@ -61,4 +65,4 @@ async def test_api_tokens_and_finance_are_user_scoped(session):
     first_accounts = await FinanceService(session, (await session.scalar(select(User).where(User.email == "test@example.com"))).id).list_accounts()
     second_accounts = await FinanceService(session, second.id).list_accounts()
     assert {a["name"] for a in first_accounts} == {"Main", "Savings"}
-    assert {a["name"] for a in second_accounts} == {"Private"}
+    assert {a["name"] for a in second_accounts} == {"Private", "お財布"}

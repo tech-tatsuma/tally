@@ -2,6 +2,7 @@ import asyncio
 import smtplib
 import uuid
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from email.message import EmailMessage
 
 from fastapi import HTTPException
@@ -10,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.core.security import hash_password, new_token, token_hash, valid_password, verify_password
-from app.models.entities import ApiToken, PasswordResetToken, User, UserRole, UserSession
+from app.models.entities import Account, AccountType, ApiToken, PasswordResetToken, User, UserRole, UserSession
 
 
 def _aware(value: datetime) -> datetime:
@@ -34,6 +35,15 @@ class AuthService:
             raise HTTPException(409, "An account with this email already exists")
         user = User(name=name.strip(), email=email, password_hash=hash_password(password), role=self._role_for_email(email))
         self.session.add(user)
+        await self.session.flush()
+        # Every household starts with a place to record the cash it carries.
+        self.session.add(Account(
+            user_id=user.id,
+            name="お財布",
+            account_type=AccountType.cash,
+            initial_balance=Decimal("0"),
+            currency=user.currency,
+        ))
         await self.session.commit()
         await self.session.refresh(user)
         return user
