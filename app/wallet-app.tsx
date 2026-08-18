@@ -12,7 +12,9 @@ type Account = {
   initial_balance?: number;
   currency: string;
   description?: string;
+  credit_closing_day?: number | null;
   credit_payment_day?: number | null;
+  credit_payment_month_offset?: number | null;
   credit_payment_account_id?: string | null;
 };
 type Category = {
@@ -52,6 +54,12 @@ const accountTypeLabel: Record<string, string> = {
   other: "その他",
 };
 const typeLabel = (type: string) => accountTypeLabel[type] || type;
+const PAYMENT_MONTH_LABEL = ["当月", "翌月", "翌々月"] as const;
+const dayLabel = (day: number) => (day >= 29 ? "末日" : `${day}日`);
+const creditClosingLabel = (day: number) =>
+  day >= 29 ? "毎月末日" : `毎月${day}日`;
+const creditPaymentLabel = (offset: number | null | undefined, day: number) =>
+  `${PAYMENT_MONTH_LABEL[offset ?? 1] ?? "翌月"}${dayLabel(day)}`;
 const CATEGORY_COLORS = [
   "#00c4cc",
   "#ff9100",
@@ -1770,6 +1778,91 @@ function TransactionForm({
   );
 }
 
+function CreditAutoPayFields({
+  accounts,
+  defaults,
+  required,
+}: {
+  accounts: Account[];
+  defaults?: Account;
+  required?: boolean;
+}) {
+  const paymentCandidates = accounts.filter(
+    (a) => a.account_type !== "credit" && a.id !== defaults?.id,
+  );
+  return (
+    <>
+      <p className="form-help">
+        締日までの利用分を、指定した支払月の支払日に引き落とし元口座から自動で精算します。月末締めの場合は締日に31を指定してください。
+      </p>
+      <div className="inline-fields">
+        <label>
+          <span>締日</span>
+          <input
+            name="credit_closing_day"
+            type="number"
+            min="1"
+            max="31"
+            defaultValue={defaults?.credit_closing_day || 31}
+            required={required}
+          />
+        </label>
+        <label>
+          <span>支払月</span>
+          <select
+            name="credit_payment_month_offset"
+            defaultValue={defaults?.credit_payment_month_offset ?? 1}
+          >
+            <option value={0}>当月</option>
+            <option value={1}>翌月</option>
+            <option value={2}>翌々月</option>
+          </select>
+        </label>
+      </div>
+      <div className="inline-fields">
+        <label>
+          <span>支払日</span>
+          <input
+            name="credit_payment_day"
+            type="number"
+            min="1"
+            max="31"
+            defaultValue={defaults?.credit_payment_day || 27}
+            required={required}
+          />
+        </label>
+        <label>
+          <span>引き落とし元口座</span>
+          <select
+            name="credit_payment_account_id"
+            required={required}
+            defaultValue={
+              defaults?.credit_payment_account_id ||
+              paymentCandidates[0]?.id ||
+              ""
+            }
+          >
+            {!required && (
+              <option value="">未設定（自動引き落としを行わない）</option>
+            )}
+            {paymentCandidates.length ? (
+              paymentCandidates.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.name}
+                </option>
+              ))
+            ) : (
+              <option value="">
+                先に引き落とし元の口座を作成してください
+              </option>
+            )}
+          </select>
+        </label>
+      </div>
+    </>
+  );
+}
+
 function Accounts({ accounts, setAccounts, go, notify, connected }: PageProps) {
   const [open, setOpen] = useState(false);
   const [accountType, setAccountType] = useState("bank");
@@ -1783,8 +1876,14 @@ function Accounts({ accounts, setAccounts, go, notify, connected }: PageProps) {
       account_type: accountType,
       institution_name: fd.get("institution_name") || null,
       initial_balance: fd.get("initial_balance"),
+      credit_closing_day: isCredit
+        ? Number(fd.get("credit_closing_day"))
+        : null,
       credit_payment_day: isCredit
         ? Number(fd.get("credit_payment_day"))
+        : null,
+      credit_payment_month_offset: isCredit
+        ? Number(fd.get("credit_payment_month_offset"))
         : null,
       credit_payment_account_id: isCredit
         ? fd.get("credit_payment_account_id")
@@ -1797,7 +1896,9 @@ function Accounts({ accounts, setAccounts, go, notify, connected }: PageProps) {
       current_balance: Number(payload.initial_balance),
       currency: "JPY",
       institution_name: String(payload.institution_name || ""),
+      credit_closing_day: payload.credit_closing_day,
       credit_payment_day: payload.credit_payment_day,
+      credit_payment_month_offset: payload.credit_payment_month_offset,
       credit_payment_account_id: payload.credit_payment_account_id as
         string | null,
     };
@@ -1891,44 +1992,7 @@ function Accounts({ accounts, setAccounts, go, notify, connected }: PageProps) {
               />
             </label>
             {accountType === "credit" && (
-              <>
-                <p className="form-help">
-                  クレジットカードとして登録すると、毎月の支払日に利用額を指定の口座から自動で引き落とします。あとから設定することもできます。
-                </p>
-                <div className="inline-fields">
-                  <label>
-                    <span>支払日</span>
-                    <input
-                      name="credit_payment_day"
-                      type="number"
-                      min="1"
-                      max="31"
-                      defaultValue="27"
-                      required={accountType === "credit"}
-                    />
-                  </label>
-                  <label>
-                    <span>引き落とし元口座</span>
-                    <select
-                      name="credit_payment_account_id"
-                      required={accountType === "credit"}
-                      defaultValue={paymentCandidates[0]?.id}
-                    >
-                      {paymentCandidates.length ? (
-                        paymentCandidates.map((c) => (
-                          <option key={c.id} value={c.id}>
-                            {c.name}
-                          </option>
-                        ))
-                      ) : (
-                        <option value="">
-                          先に引き落とし元の口座を作成してください
-                        </option>
-                      )}
-                    </select>
-                  </label>
-                </div>
-              </>
+              <CreditAutoPayFields accounts={accounts} required />
             )}
             <button
               className="primary"
@@ -1993,9 +2057,6 @@ function AccountDetail({
         n + (t.type === "expense" ? Number(t.amount) : -Number(t.amount)),
       0,
     );
-  const paymentCandidates = accounts.filter(
-    (a) => a.account_type !== "credit" && a.id !== account.id,
-  );
   const openEdit = () => {
     setEditType(account.account_type);
     setEditing(true);
@@ -2010,8 +2071,14 @@ function AccountDetail({
       account_type: editType,
       institution_name: fd.get("institution_name") || null,
       description: fd.get("description") || null,
+      credit_closing_day: autoPayEnabled
+        ? Number(fd.get("credit_closing_day"))
+        : null,
       credit_payment_day: autoPayEnabled
         ? Number(fd.get("credit_payment_day"))
+        : null,
+      credit_payment_month_offset: autoPayEnabled
+        ? Number(fd.get("credit_payment_month_offset"))
         : null,
       credit_payment_account_id: autoPayEnabled
         ? fd.get("credit_payment_account_id")
@@ -2082,11 +2149,17 @@ function AccountDetail({
         <section className="info-banner">
           <span>💳</span>
           <p>
-            {account.credit_payment_day && paymentAccount ? (
+            {account.credit_closing_day &&
+            account.credit_payment_day &&
+            paymentAccount ? (
               <>
                 <strong>
-                  毎月{account.credit_payment_day}日に「{paymentAccount.name}
-                  」から自動引き落とし
+                  {creditClosingLabel(account.credit_closing_day)}締め →{" "}
+                  {creditPaymentLabel(
+                    account.credit_payment_month_offset,
+                    account.credit_payment_day,
+                  )}
+                  に「{paymentAccount.name}」から自動引き落とし
                 </strong>
                 <br />
                 未精算の利用額：{money(Math.max(0, unsettled))}
@@ -2096,7 +2169,7 @@ function AccountDetail({
               <>
                 <strong>自動引き落としが未設定です</strong>
                 <br />
-                「口座を編集」から支払日と引き落とし元口座を設定すると、毎月自動で精算されます。取引の入力が遅れても、次回の引き落としで自動的にまとめて精算されます。
+                「口座を編集」から締日・支払日と引き落とし元口座を設定すると、毎月自動で精算されます。取引の入力が遅れても、次回の引き落としで自動的にまとめて精算されます。
               </>
             )}
           </p>
@@ -2134,7 +2207,7 @@ function AccountDetail({
                 settlements.map((s) => (
                   <div key={s.id}>
                     <span>
-                      <strong>{s.period_key}分の引き落とし</strong>
+                      <strong>{s.period_key}締め分の引き落とし</strong>
                       <small>{s.settled_on.replaceAll("-", "/")}</small>
                     </span>
                     <b>{money(s.amount)}</b>
@@ -2187,36 +2260,7 @@ function AccountDetail({
               </select>
             </label>
             {editType === "credit" && (
-              <div className="inline-fields">
-                <label>
-                  <span>支払日</span>
-                  <input
-                    name="credit_payment_day"
-                    type="number"
-                    min="1"
-                    max="31"
-                    defaultValue={account.credit_payment_day || 27}
-                  />
-                </label>
-                <label>
-                  <span>引き落とし元口座</span>
-                  <select
-                    name="credit_payment_account_id"
-                    defaultValue={
-                      account.credit_payment_account_id ||
-                      paymentCandidates[0]?.id ||
-                      ""
-                    }
-                  >
-                    <option value="">未設定（自動引き落としを行わない）</option>
-                    {paymentCandidates.map((c) => (
-                      <option key={c.id} value={c.id}>
-                        {c.name}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-              </div>
+              <CreditAutoPayFields accounts={accounts} defaults={account} />
             )}
             <label>
               <span>説明</span>

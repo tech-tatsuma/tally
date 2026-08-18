@@ -119,8 +119,10 @@ class Account(TimestampMixin, Base):
     currency: Mapped[str] = mapped_column(String(3), default="JPY")
     description: Mapped[str | None] = mapped_column(Text)
     is_archived: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
-    # Credit-card settings: which day of the month the balance is auto-debited, and from which account.
+    # Credit-card cycle: closing day (31 = month-end), payment day, and which month pays (0/1/2).
+    credit_closing_day: Mapped[int | None] = mapped_column(Integer)
     credit_payment_day: Mapped[int | None] = mapped_column(Integer)
+    credit_payment_month_offset: Mapped[int | None] = mapped_column(Integer)
     credit_payment_account_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("accounts.id", use_alter=True, name="fk_accounts_credit_payment_account_id_accounts", deferrable=True, initially="DEFERRED")
     )
@@ -138,12 +140,12 @@ class Category(TimestampMixin, Base):
 
 
 class CreditSettlement(TimestampMixin, Base):
-    """Records one automatic credit-card payoff run for a (credit account, month) pair.
+    """Records one automatic credit-card payoff for a closing-month cycle.
 
-    Idempotency key is (credit_account_id, period_key): once a period has been settled, the
-    scheduler will not settle it again. Any expense/income transactions on the credit account
-    that were not yet linked to a settlement (e.g. entered late, or backdated) are swept into
-    whichever settlement runs next, regardless of which month they actually occurred in.
+    period_key is the closing year-month (e.g. 2026-08 for 月末締め → 翌月27日払い).
+    Once a period is settled it is not settled again. Unsettled expense/income on the card
+    with occurred_at on or before that closing date — including late or backdated entries
+    from earlier cycles — is swept into whichever due settlement runs next.
     """
 
     __tablename__ = "credit_settlements"

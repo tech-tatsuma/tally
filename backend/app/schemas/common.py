@@ -18,15 +18,23 @@ class AccountCreate(BaseModel):
     initial_balance: Decimal = Decimal("0")
     currency: str = Field(default="JPY", min_length=3, max_length=3)
     description: str | None = None
+    credit_closing_day: int | None = Field(default=None, ge=1, le=31)
     credit_payment_day: int | None = Field(default=None, ge=1, le=31)
+    credit_payment_month_offset: int | None = Field(default=None, ge=0, le=2)
     credit_payment_account_id: uuid.UUID | None = None
 
     @model_validator(mode="after")
     def validate_credit_fields(self):
-        if self.account_type != AccountType.credit and (self.credit_payment_day is not None or self.credit_payment_account_id is not None):
-            raise ValueError("credit_payment_day and credit_payment_account_id require account_type=credit")
-        if (self.credit_payment_day is None) != (self.credit_payment_account_id is None):
-            raise ValueError("credit_payment_day and credit_payment_account_id must be set together")
+        auto_pay = (self.credit_closing_day, self.credit_payment_day, self.credit_payment_account_id)
+        has_auto_pay = any(value is not None for value in auto_pay)
+        if self.account_type != AccountType.credit:
+            if has_auto_pay or self.credit_payment_month_offset is not None:
+                raise ValueError("credit closing/payment fields require account_type=credit")
+            return self
+        if has_auto_pay and any(value is None for value in auto_pay):
+            raise ValueError("credit_closing_day, credit_payment_day and credit_payment_account_id must be set together")
+        if self.credit_payment_month_offset is not None and not has_auto_pay:
+            raise ValueError("credit_payment_month_offset requires credit auto-pay settings")
         return self
 
 
@@ -35,7 +43,9 @@ class AccountUpdate(BaseModel):
     account_type: AccountType | None = None
     institution_name: str | None = None
     description: str | None = None
+    credit_closing_day: int | None = Field(default=None, ge=1, le=31)
     credit_payment_day: int | None = Field(default=None, ge=1, le=31)
+    credit_payment_month_offset: int | None = Field(default=None, ge=0, le=2)
     credit_payment_account_id: uuid.UUID | None = None
 
 
@@ -49,7 +59,9 @@ class AccountRead(ORMModel):
     currency: str
     description: str | None
     is_archived: bool
+    credit_closing_day: int | None
     credit_payment_day: int | None
+    credit_payment_month_offset: int | None
     credit_payment_account_id: uuid.UUID | None
 
 

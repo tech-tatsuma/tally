@@ -12,6 +12,42 @@ from app.repositories.finance import FinanceRepository
 from app.schemas.common import AccountCreate, AccountUpdate, RecurringCreate, RecurringUpdate, TransactionCreate, TransactionUpdate
 
 
+def add_months(year: int, month: int, delta: int) -> tuple[int, int]:
+    total = year * 12 + (month - 1) + delta
+    return total // 12, total % 12 + 1
+
+
+def calendar_date(year: int, month: int, day: int) -> date:
+    return date(year, month, min(day, calendar.monthrange(year, month)[1]))
+
+
+def closing_on_or_after(day: date, closing_day: int) -> date:
+    this_close = calendar_date(day.year, day.month, closing_day)
+    if day <= this_close:
+        return this_close
+    year, month = add_months(day.year, day.month, 1)
+    return calendar_date(year, month, closing_day)
+
+
+def payment_date_for_closing(closing: date, payment_day: int, offset: int) -> date:
+    year, month = add_months(closing.year, closing.month, offset)
+    return calendar_date(year, month, payment_day)
+
+
+def iter_due_closing_dates(today: date, closing_day: int, payment_day: int, offset: int, from_date: date):
+    closing = closing_on_or_after(from_date, closing_day)
+    while payment_date_for_closing(closing, payment_day, offset) <= today:
+        yield closing
+        year, month = add_months(closing.year, closing.month, 1)
+        closing = calendar_date(year, month, closing_day)
+
+
+def _occurred_date(value: datetime) -> date:
+    if value.tzinfo is None:
+        return value.date()
+    return value.astimezone(timezone.utc).date()
+
+
 class FinanceService:
     def __init__(self, session: AsyncSession, user_id: uuid.UUID):
         self.session, self.user_id = session, user_id
@@ -41,23 +77,46 @@ class FinanceService:
         if not account: raise HTTPException(404, "Account not found")
         return {**account.__dict__, "current_balance": await self.account_balance(account)}
 
-    async def _validate_credit_fields(self, account_type: AccountType, payment_day: int | None, payment_account_id: uuid.UUID | None, self_id: uuid.UUID | None = None) -> None:
+    async def _validate_credit_fields(
+        self,
+        account_type: AccountType,
+        closing_day: int | None,
+        payment_day: int | None,
+        payment_month_offset: int | None,
+        payment_account_id: uuid.UUID | None,
+        self_id: uuid.UUID | None = None,
+    ) -> None:
+        auto_pay = (closing_day, payment_day, payment_account_id)
+        has_auto_pay = any(value is not None for value in auto_pay)
         if account_type != AccountType.credit:
-            if payment_day is not None or payment_account_id is not None:
-                raise HTTPException(422, "credit_payment_day and credit_payment_account_id require account_type=credit")
+            if has_auto_pay or payment_month_offset is not None:
+                raise HTTPException(422, "credit closing/payment fields require account_type=credit")
             return
-        if (payment_day is None) != (payment_account_id is None):
-            raise HTTPException(422, "credit_payment_day and credit_payment_account_id must be set together")
-        if payment_account_id is None: return
+        if has_auto_pay and any(value is None for value in auto_pay):
+            raise HTTPException(422, "credit_closing_day, credit_payment_day and credit_payment_account_id must be set together")
+        if payment_month_offset is not None and not has_auto_pay:
+            raise HTTPException(422, "credit_payment_month_offset requires credit auto-pay settings")
+        if payment_account_id is None:
+            return
         if self_id is not None and payment_account_id == self_id:
             raise HTTPException(422, "credit_payment_account_id must be a different account")
         payment_account = await self.repo.account(self.user_id, payment_account_id)
         if not payment_account or payment_account.is_archived: raise HTTPException(422, "Payment account not found or archived")
         if payment_account.account_type == AccountType.credit: raise HTTPException(422, "Payment account cannot itself be a credit account")
 
+    @staticmethod
+    def _with_default_payment_offset(values: dict) -> dict:
+        if values.get("credit_payment_account_id") is not None and values.get("credit_payment_month_offset") is None:
+            return {**values, "credit_payment_month_offset": 1}
+        return values
+
     async def create_account(self, data: AccountCreate) -> dict:
-        await self._validate_credit_fields(data.account_type, data.credit_payment_day, data.credit_payment_account_id)
-        account = Account(user_id=self.user_id, **data.model_dump())
+        values = self._with_default_payment_offset(data.model_dump())
+        await self._validate_credit_fields(
+            data.account_type, values.get("credit_closing_day"), values.get("credit_payment_day"),
+            values.get("credit_payment_month_offset"), values.get("credit_payment_account_id"),
+        )
+        account = Account(user_id=self.user_id, **values)
         self.session.add(account); await self.session.flush(); await self.session.commit()
         return await self.get_account(account.id)
 
@@ -66,9 +125,14 @@ class FinanceService:
         if not account: raise HTTPException(404, "Account not found")
         values = data.model_dump(exclude_unset=True)
         account_type = values.get("account_type", account.account_type)
+        closing_day = values.get("credit_closing_day", account.credit_closing_day)
         payment_day = values.get("credit_payment_day", account.credit_payment_day)
         payment_account_id = values.get("credit_payment_account_id", account.credit_payment_account_id)
-        await self._validate_credit_fields(account_type, payment_day, payment_account_id, self_id=account.id)
+        payment_month_offset = values.get("credit_payment_month_offset", account.credit_payment_month_offset)
+        if payment_account_id is not None and payment_month_offset is None:
+            payment_month_offset = 1
+            values["credit_payment_month_offset"] = 1
+        await self._validate_credit_fields(account_type, closing_day, payment_day, payment_month_offset, payment_account_id, self_id=account.id)
         for key, value in values.items(): setattr(account, key, value)
         await self.session.commit(); return await self.get_account(account.id)
 
@@ -162,43 +226,52 @@ class FinanceService:
         await self.session.commit(); return created
 
     async def process_due_credit_settlements(self, today: date) -> int:
-        """Auto-pay each credit account's outstanding balance from its linked payment account.
+        """Pay each due closing cycle from the linked payment account.
 
-        Runs once per (credit account, calendar month), on or after credit_payment_day. Every
-        run sweeps *all* not-yet-settled expense/income transactions on the credit account, no
-        matter how old - so a transaction entered late (or backdated) is simply picked up by
-        whichever settlement runs next, instead of being silently missed.
+        A cycle closes on credit_closing_day (31 = month-end) and is paid
+        credit_payment_month_offset months later on credit_payment_day. Example:
+        月末締め → 翌月27日払い is closing_day=31, payment_day=27, offset=1.
+
+        Each due closing is settled once (period_key = closing year-month). Unsettled
+        expense/income dated on or before that closing — including late entries from
+        earlier cycles — is swept into the next settlement that runs.
         """
         credit_accounts = list(await self.session.scalars(select(Account).where(
             Account.user_id == self.user_id, Account.account_type == AccountType.credit, Account.is_archived.is_(False),
-            Account.credit_payment_day.isnot(None), Account.credit_payment_account_id.isnot(None),
+            Account.credit_closing_day.isnot(None), Account.credit_payment_day.isnot(None), Account.credit_payment_account_id.isnot(None),
         ).with_for_update()))
         settled = 0
         for credit in credit_accounts:
-            effective_day = min(credit.credit_payment_day, calendar.monthrange(today.year, today.month)[1])
-            if today.day < effective_day: continue
-            period_key = today.strftime("%Y-%m")
-            already = await self.session.scalar(select(CreditSettlement.id).where(CreditSettlement.credit_account_id == credit.id, CreditSettlement.period_key == period_key))
-            if already: continue
+            offset = 1 if credit.credit_payment_month_offset is None else credit.credit_payment_month_offset
             payment_account = await self.repo.account(self.user_id, credit.credit_payment_account_id)
             if not payment_account or payment_account.is_archived: continue
-            cutoff = datetime.combine(today + timedelta(days=1), time(0), tzinfo=timezone.utc)
             unsettled = list(await self.session.scalars(select(Transaction).where(
                 Transaction.user_id == self.user_id, Transaction.account_id == credit.id, Transaction.credit_settlement_id.is_(None),
-                Transaction.type.in_([TransactionType.expense, TransactionType.income]), Transaction.occurred_at < cutoff,
+                Transaction.type.in_([TransactionType.expense, TransactionType.income]),
             )))
             if not unsettled: continue
-            amount = sum((tx.amount if tx.type == TransactionType.expense else -tx.amount for tx in unsettled), Decimal("0"))
-            if amount <= 0: continue
-            group = uuid.uuid4()
-            occurred_at = datetime.combine(today, time(0), tzinfo=timezone.utc)
-            title = f"{credit.name} 自動引き落とし"
-            debit = Transaction(user_id=self.user_id, account_id=payment_account.id, type=TransactionType.transfer, amount=amount, occurred_at=occurred_at, title=title, transfer_group_id=group, transfer_direction=TransferDirection.debit)
-            credit_leg = Transaction(user_id=self.user_id, account_id=credit.id, type=TransactionType.transfer, amount=amount, occurred_at=occurred_at, title=title, transfer_group_id=group, transfer_direction=TransferDirection.credit)
-            settlement = CreditSettlement(user_id=self.user_id, credit_account_id=credit.id, payment_account_id=payment_account.id, period_key=period_key, amount=amount, transfer_group_id=group, settled_on=today)
-            self.session.add_all([debit, credit_leg, settlement]); await self.session.flush()
-            for tx in unsettled: tx.credit_settlement_id = settlement.id
-            settled += 1
+            oldest = min(_occurred_date(tx.occurred_at) for tx in unsettled)
+            remaining = unsettled
+            for closing in iter_due_closing_dates(today, credit.credit_closing_day, credit.credit_payment_day, offset, oldest):
+                period_key = closing.strftime("%Y-%m")
+                already = await self.session.scalar(select(CreditSettlement.id).where(CreditSettlement.credit_account_id == credit.id, CreditSettlement.period_key == period_key))
+                if already: continue
+                cutoff = datetime.combine(closing + timedelta(days=1), time(0), tzinfo=timezone.utc)
+                batch = [tx for tx in remaining if (tx.occurred_at if tx.occurred_at.tzinfo else tx.occurred_at.replace(tzinfo=timezone.utc)) < cutoff]
+                if not batch: continue
+                amount = sum((tx.amount if tx.type == TransactionType.expense else -tx.amount for tx in batch), Decimal("0"))
+                if amount <= 0: continue
+                pay_on = payment_date_for_closing(closing, credit.credit_payment_day, offset)
+                group = uuid.uuid4()
+                occurred_at = datetime.combine(pay_on, time(0), tzinfo=timezone.utc)
+                title = f"{credit.name} 自動引き落とし"
+                debit = Transaction(user_id=self.user_id, account_id=payment_account.id, type=TransactionType.transfer, amount=amount, occurred_at=occurred_at, title=title, transfer_group_id=group, transfer_direction=TransferDirection.debit)
+                credit_leg = Transaction(user_id=self.user_id, account_id=credit.id, type=TransactionType.transfer, amount=amount, occurred_at=occurred_at, title=title, transfer_group_id=group, transfer_direction=TransferDirection.credit)
+                settlement = CreditSettlement(user_id=self.user_id, credit_account_id=credit.id, payment_account_id=payment_account.id, period_key=period_key, amount=amount, transfer_group_id=group, settled_on=pay_on)
+                self.session.add_all([debit, credit_leg, settlement]); await self.session.flush()
+                for tx in batch: tx.credit_settlement_id = settlement.id
+                remaining = [tx for tx in remaining if tx not in batch]
+                settled += 1
         await self.session.commit(); return settled
 
     async def list_credit_settlements(self, account_id: uuid.UUID) -> list[CreditSettlement]:

@@ -9,7 +9,7 @@ from app.models.entities import Account, Category, CategoryType, CreditSettlemen
 from app.schemas.common import AccountCreate, AccountUpdate, RecurringCreate, RecurringUpdate, TransactionCreate, TransactionUpdate
 from app.services.analytics import AnalyticsService
 from app.services.backup import BackupService
-from app.services.finance import FinanceService
+from app.services.finance import FinanceService, calendar_date, closing_on_or_after, iter_due_closing_dates, payment_date_for_closing
 from tests.conftest import USER_ID
 
 
@@ -68,64 +68,127 @@ async def test_cashflow_and_asset_history(session):
     assert history[-1]["assets"] == Decimal("16800")
 
 
+def credit_card(bank_id, closing_day=31, payment_day=27, offset=1):
+    return AccountCreate(
+        name="Card", account_type="credit", credit_closing_day=closing_day,
+        credit_payment_day=payment_day, credit_payment_month_offset=offset, credit_payment_account_id=bank_id,
+    )
+
+
 def test_account_create_credit_fields_must_be_paired():
     with pytest.raises(ValueError):
-        AccountCreate(name="Card", account_type="credit", credit_payment_day=25)
+        AccountCreate(name="Card", account_type="credit", credit_payment_day=27)
     with pytest.raises(ValueError):
-        AccountCreate(name="Card", account_type="bank", credit_payment_day=25, credit_payment_account_id=USER_ID)
+        AccountCreate(name="Card", account_type="credit", credit_closing_day=31, credit_payment_day=27)
+    with pytest.raises(ValueError):
+        AccountCreate(name="Card", account_type="bank", credit_closing_day=31, credit_payment_day=27, credit_payment_account_id=USER_ID)
+
+
+def test_credit_cycle_dates():
+    assert calendar_date(2026, 2, 31) == date(2026, 2, 28)
+    assert closing_on_or_after(date(2026, 8, 10), 31) == date(2026, 8, 31)
+    assert closing_on_or_after(date(2026, 9, 1), 31) == date(2026, 9, 30)
+    assert closing_on_or_after(date(2026, 8, 11), 10) == date(2026, 9, 10)
+    assert payment_date_for_closing(date(2026, 8, 31), 27, 1) == date(2026, 9, 27)
+    assert payment_date_for_closing(date(2026, 8, 10), 27, 0) == date(2026, 8, 27)
+    assert list(iter_due_closing_dates(date(2026, 9, 26), 31, 27, 1, date(2026, 8, 10))) == []
+    assert list(iter_due_closing_dates(date(2026, 9, 27), 31, 27, 1, date(2026, 8, 10))) == [date(2026, 8, 31)]
+    assert list(iter_due_closing_dates(date(2026, 8, 27), 31, 27, 1, date(2026, 8, 10))) == []
 
 
 async def test_update_account_validates_credit_fields(session):
     accounts, _, _ = await fixtures(session); service = FinanceService(session, USER_ID)
     bank = accounts[0]
     with pytest.raises(HTTPException):
-        await service.update_account(bank.id, AccountUpdate(credit_payment_day=25, credit_payment_account_id=accounts[1].id))
+        await service.update_account(bank.id, AccountUpdate(credit_closing_day=31, credit_payment_day=27, credit_payment_account_id=accounts[1].id))
     card = await service.create_account(AccountCreate(name="Card", account_type="bank"))
-    updated = await service.update_account(card["id"], AccountUpdate(account_type="credit", credit_payment_day=25, credit_payment_account_id=bank.id))
+    updated = await service.update_account(card["id"], AccountUpdate(account_type="credit", credit_closing_day=31, credit_payment_day=27, credit_payment_account_id=bank.id))
     assert updated["account_type"] == "credit"
-    assert updated["credit_payment_day"] == 25
+    assert updated["credit_closing_day"] == 31
+    assert updated["credit_payment_day"] == 27
+    assert updated["credit_payment_month_offset"] == 1
     with pytest.raises(HTTPException):
         await service.update_account(card["id"], AccountUpdate(credit_payment_account_id=card["id"]))
     with pytest.raises(HTTPException):
-        await service.update_account(bank.id, AccountUpdate(account_type="credit", credit_payment_day=1, credit_payment_account_id=card["id"]))
+        await service.update_account(bank.id, AccountUpdate(account_type="credit", credit_closing_day=31, credit_payment_day=1, credit_payment_account_id=card["id"]))
 
 
-async def test_credit_settlement_pays_from_linked_account_and_is_idempotent(session):
+async def test_credit_settlement_pays_month_end_close_next_month_27(session):
     accounts, expense, _ = await fixtures(session); service = FinanceService(session, USER_ID)
     bank = accounts[0]
-    card = await service.create_account(AccountCreate(name="Card", account_type="credit", credit_payment_day=25, credit_payment_account_id=bank.id))
+    card = await service.create_account(credit_card(bank.id))
     card_account = await session.get(Account, card["id"])
     await service.create_transaction(TransactionCreate(account_id=card_account.id, category_id=expense.id, type="expense", amount="3000", occurred_at=datetime(2026, 8, 10, tzinfo=timezone.utc), title="Groceries"))
-    assert await service.account_balance(card_account) == Decimal("-3000")
+    await service.create_transaction(TransactionCreate(account_id=card_account.id, category_id=expense.id, type="expense", amount="500", occurred_at=datetime(2026, 9, 1, tzinfo=timezone.utc), title="After closing"))
+    assert await service.account_balance(card_account) == Decimal("-3500")
 
-    assert await service.process_due_credit_settlements(date(2026, 8, 20)) == 0
-    assert await service.account_balance(card_account) == Decimal("-3000")
+    assert await service.process_due_credit_settlements(date(2026, 8, 27)) == 0
+    assert await service.process_due_credit_settlements(date(2026, 8, 31)) == 0
+    assert await service.process_due_credit_settlements(date(2026, 9, 26)) == 0
+    assert await service.account_balance(card_account) == Decimal("-3500")
 
-    assert await service.process_due_credit_settlements(date(2026, 8, 25)) == 1
-    assert await service.account_balance(card_account) == Decimal("0")
+    assert await service.process_due_credit_settlements(date(2026, 9, 27)) == 1
+    assert await service.account_balance(card_account) == Decimal("-500")
     assert await service.account_balance(bank) == Decimal("7000")
 
-    assert await service.process_due_credit_settlements(date(2026, 8, 25)) == 0
+    assert await service.process_due_credit_settlements(date(2026, 9, 27)) == 0
     assert await service.account_balance(bank) == Decimal("7000")
 
     settlements = await service.list_credit_settlements(card_account.id)
     assert len(settlements) == 1 and settlements[0].amount == Decimal("3000") and settlements[0].period_key == "2026-08"
+    assert settlements[0].settled_on == date(2026, 9, 27)
+
+    assert await service.process_due_credit_settlements(date(2026, 10, 27)) == 1
+    assert await service.account_balance(card_account) == Decimal("0")
+    september = (await service.list_credit_settlements(card_account.id))[0]
+    assert september.period_key == "2026-09" and september.amount == Decimal("500")
+
+
+async def test_credit_settlement_same_month_payment(session):
+    accounts, expense, _ = await fixtures(session); service = FinanceService(session, USER_ID)
+    bank = accounts[0]
+    card = await service.create_account(credit_card(bank.id, closing_day=10, payment_day=27, offset=0))
+    card_account = await session.get(Account, card["id"])
+    await service.create_transaction(TransactionCreate(account_id=card_account.id, category_id=expense.id, type="expense", amount="2000", occurred_at=datetime(2026, 8, 5, tzinfo=timezone.utc), title="Before close"))
+    await service.create_transaction(TransactionCreate(account_id=card_account.id, category_id=expense.id, type="expense", amount="800", occurred_at=datetime(2026, 8, 11, tzinfo=timezone.utc), title="After close"))
+
+    assert await service.process_due_credit_settlements(date(2026, 8, 26)) == 0
+    assert await service.process_due_credit_settlements(date(2026, 8, 27)) == 1
+    assert await service.account_balance(card_account) == Decimal("-800")
+    settlements = await service.list_credit_settlements(card_account.id)
+    assert settlements[0].period_key == "2026-08" and settlements[0].amount == Decimal("2000")
 
 
 async def test_credit_settlement_sweeps_late_entered_transactions(session):
     accounts, expense, _ = await fixtures(session); service = FinanceService(session, USER_ID)
     bank = accounts[0]
-    card = await service.create_account(AccountCreate(name="Card", account_type="credit", credit_payment_day=25, credit_payment_account_id=bank.id))
+    card = await service.create_account(credit_card(bank.id))
     card_account = await session.get(Account, card["id"])
 
-    assert await service.process_due_credit_settlements(date(2026, 8, 25)) == 0
+    assert await service.process_due_credit_settlements(date(2026, 9, 27)) == 0
     assert len(list(await session.scalars(select(CreditSettlement)))) == 0
 
     await service.create_transaction(TransactionCreate(account_id=card_account.id, category_id=expense.id, type="expense", amount="1500", occurred_at=datetime(2026, 8, 12, tzinfo=timezone.utc), title="Forgotten entry, added late"))
 
-    assert await service.process_due_credit_settlements(date(2026, 9, 25)) == 1
+    assert await service.process_due_credit_settlements(date(2026, 9, 27)) == 1
     settlements = await service.list_credit_settlements(card_account.id)
-    assert len(settlements) == 1 and settlements[0].period_key == "2026-09" and settlements[0].amount == Decimal("1500")
+    assert len(settlements) == 1 and settlements[0].period_key == "2026-08" and settlements[0].amount == Decimal("1500")
+
+
+async def test_credit_settlement_late_entry_after_period_already_settled(session):
+    accounts, expense, _ = await fixtures(session); service = FinanceService(session, USER_ID)
+    bank = accounts[0]
+    card = await service.create_account(credit_card(bank.id))
+    card_account = await session.get(Account, card["id"])
+    await service.create_transaction(TransactionCreate(account_id=card_account.id, category_id=expense.id, type="expense", amount="1000", occurred_at=datetime(2026, 8, 5, tzinfo=timezone.utc), title="On time"))
+    assert await service.process_due_credit_settlements(date(2026, 9, 27)) == 1
+
+    await service.create_transaction(TransactionCreate(account_id=card_account.id, category_id=expense.id, type="expense", amount="400", occurred_at=datetime(2026, 8, 20, tzinfo=timezone.utc), title="Forgotten after settlement"))
+    assert await service.process_due_credit_settlements(date(2026, 9, 27)) == 0
+    assert await service.process_due_credit_settlements(date(2026, 10, 27)) == 1
+    settlements = await service.list_credit_settlements(card_account.id)
+    assert [s.period_key for s in settlements] == ["2026-09", "2026-08"]
+    assert settlements[0].amount == Decimal("400")
 
 
 async def test_backup_round_trip(session):

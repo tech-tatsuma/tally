@@ -23,7 +23,7 @@ async def seed():
         accounts = [Account(user_id=user_id, name="メイン銀行", institution_name="みらい銀行", account_type=AccountType.bank, initial_balance=Decimal("1080000")), Account(user_id=user_id, name="貯蓄口座", institution_name="つばさ銀行", account_type=AccountType.bank, initial_balance=Decimal("720000")), Account(user_id=user_id, name="現金", account_type=AccountType.cash, initial_balance=Decimal("80000")), Account(user_id=user_id, name="投資", account_type=AccountType.investment, initial_balance=Decimal("350000"))]
         categories = [Category(user_id=user_id, name=n, type=t, color=c) for n, t, c in [("食費", CategoryType.expense, "#00c4cc"), ("カフェ", CategoryType.expense, "#ff9100"), ("住居費", CategoryType.expense, "#2d4b9b"), ("交通費", CategoryType.expense, "#69d7ff"), ("娯楽", CategoryType.expense, "#e65537"), ("給与", CategoryType.income, "#4bb47d")]]
         s.add(user); s.add_all(accounts + categories); await s.flush()
-        credit_card = Account(user_id=user_id, name="メインカード", institution_name="みらいカード", account_type=AccountType.credit, initial_balance=Decimal("0"), credit_payment_day=27, credit_payment_account_id=accounts[0].id)
+        credit_card = Account(user_id=user_id, name="メインカード", institution_name="みらいカード", account_type=AccountType.credit, initial_balance=Decimal("0"), credit_closing_day=31, credit_payment_day=27, credit_payment_month_offset=1, credit_payment_account_id=accounts[0].id)
         s.add(credit_card); await s.flush()
         s.add_all([
             Transaction(user_id=user_id, account_id=credit_card.id, category_id=categories[0].id, type=TransactionType.expense, amount=Decimal("4200"), occurred_at=datetime.now(timezone.utc) - timedelta(days=3), title="スーパーで買い物"),
