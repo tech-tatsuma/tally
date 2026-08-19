@@ -6,7 +6,8 @@ from fastapi import HTTPException
 from sqlalchemy import select
 
 from app.models.entities import Account, Category, CategoryType, CreditSettlement, Transaction
-from app.schemas.common import AccountCreate, AccountUpdate, RecurringCreate, RecurringUpdate, TransactionCreate, TransactionUpdate
+from app.api.router import update_category
+from app.schemas.common import AccountCreate, AccountUpdate, CategoryUpdate, RecurringCreate, RecurringUpdate, TransactionCreate, TransactionUpdate
 from app.services.analytics import AnalyticsService
 from app.services.backup import BackupService
 from app.services.finance import FinanceService, calendar_date, closing_on_or_after, iter_due_closing_dates, payment_date_for_closing
@@ -202,3 +203,17 @@ async def test_backup_round_trip(session):
     assert result["restored"]["transactions"] == 1
     assert restored[0].amount == Decimal("850")
     assert restored[0].journal == "A good day"
+
+
+async def test_update_category_name_color_and_unused_type(session):
+    accounts, expense, income = await fixtures(session)
+    updated = await update_category(expense.id, CategoryUpdate(name="食料品", color="#ff9100"), session, USER_ID)
+    assert updated.name == "食料品"
+    assert updated.color == "#ff9100"
+    switched = await update_category(expense.id, CategoryUpdate(type="income"), session, USER_ID)
+    assert switched.type.value == "income"
+    service = FinanceService(session, USER_ID)
+    await service.create_transaction(TransactionCreate(account_id=accounts[0].id, category_id=income.id, type="income", amount="2000", occurred_at=datetime.now(timezone.utc), title="Work"))
+    with pytest.raises(HTTPException) as error:
+        await update_category(income.id, CategoryUpdate(type="expense"), session, USER_ID)
+    assert error.value.status_code == 409

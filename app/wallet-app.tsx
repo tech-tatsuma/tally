@@ -60,19 +60,35 @@ const creditClosingLabel = (day: number) =>
   day >= 29 ? "毎月末日" : `毎月${day}日`;
 const creditPaymentLabel = (offset: number | null | undefined, day: number) =>
   `${PAYMENT_MONTH_LABEL[offset ?? 1] ?? "翌月"}${dayLabel(day)}`;
-const CATEGORY_COLORS = [
-  "#00c4cc",
-  "#ff9100",
-  "#2d4b9b",
-  "#69d7ff",
-  "#e65537",
-  "#4bb47d",
-  "#2d7df0",
-  "#05878c",
-];
+const CATEGORY_PALETTE = [
+  { value: "#00c4cc", label: "ターコイズ" },
+  { value: "#ffcd00", label: "イエロー" },
+  { value: "#ff9100", label: "オレンジ" },
+  { value: "#e65537", label: "コーラル" },
+  { value: "#2d4b9b", label: "ネイビー" },
+  { value: "#2d7df0", label: "ブルー" },
+  { value: "#69d7ff", label: "スカイ" },
+  { value: "#4bb47d", label: "グリーン" },
+  { value: "#05878c", label: "ティール" },
+] as const;
+const CATEGORY_COLORS = CATEGORY_PALETTE.map((color) => color.value);
 const FALLBACK_CATEGORY_COLOR = "#aaa69f";
 const categoryColor = (color: string | undefined, index: number) =>
   color || CATEGORY_COLORS[index % CATEGORY_COLORS.length] || FALLBACK_CATEGORY_COLOR;
+const categoryColorLabel = (value: string | undefined) =>
+  CATEGORY_PALETTE.find((color) => color.value.toLowerCase() === value?.toLowerCase())
+    ?.label;
+const nextCategoryColor = (categories: Category[]) => {
+  const used = new Set(
+    categories
+      .map((category) => category.color?.toLowerCase())
+      .filter((color): color is string => Boolean(color)),
+  );
+  return (
+    CATEGORY_PALETTE.find((color) => !used.has(color.value.toLowerCase()))?.value ??
+    CATEGORY_COLORS[categories.length % CATEGORY_COLORS.length]
+  );
+};
 const donutGradient = (slices: { color: string; amount: number }[]) => {
   const total = slices.reduce((n, slice) => n + slice.amount, 0);
   if (total <= 0) return `conic-gradient(${FALLBACK_CATEGORY_COLOR} 0 100%)`;
@@ -991,6 +1007,7 @@ function Metric({
     </div>
   );
 }
+
 function SectionHead({
   title,
   link,
@@ -1005,6 +1022,54 @@ function SectionHead({
       <h2>{title}</h2>
       {link && <button onClick={onClick}>{link} →</button>}
     </div>
+  );
+}
+
+function ColorSwatchPicker({
+  name,
+  value,
+  defaultValue,
+  onChange,
+}: {
+  name?: string;
+  value?: string;
+  defaultValue?: string;
+  onChange?: (value: string) => void;
+}) {
+  const [internal, setInternal] = useState(
+    value ?? defaultValue ?? CATEGORY_COLORS[0],
+  );
+  const selected = value ?? internal;
+  const selectedLabel = categoryColorLabel(selected);
+  const choose = (next: string) => {
+    if (value === undefined) setInternal(next);
+    onChange?.(next);
+  };
+  return (
+    <fieldset className="color-swatches">
+      <legend>
+        色
+        {selectedLabel ? <small> {selectedLabel}</small> : null}
+      </legend>
+      {name ? <input type="hidden" name={name} value={selected} /> : null}
+      <div>
+        {CATEGORY_PALETTE.map((color) => {
+          const active = selected.toLowerCase() === color.value.toLowerCase();
+          return (
+            <button
+              key={color.value}
+              type="button"
+              className={active ? "active" : undefined}
+              style={{ background: color.value }}
+              aria-label={color.label}
+              aria-pressed={active}
+              title={color.label}
+              onClick={() => choose(color.value)}
+            />
+          );
+        })}
+      </div>
+    </fieldset>
   );
 }
 
@@ -1027,7 +1092,7 @@ function CategoryField({
 }) {
   const [adding, setAdding] = useState(false);
   const [name, setName] = useState("");
-  const [color, setColor] = useState(CATEGORY_COLORS[0]);
+  const [color, setColor] = useState(() => nextCategoryColor(categories));
   const visible = categories.filter((c) => c.type === type);
   const add = async () => {
     const trimmed = name.trim();
@@ -1048,7 +1113,11 @@ function CategoryField({
         if (!response.ok) throw new Error();
         item = await response.json();
       }
-      setCategories((all) => [...all, item]);
+      setCategories((all) => {
+        const next = [...all, item];
+        setColor(nextCategoryColor(next));
+        return next;
+      });
       setAdding(false);
       setName("");
       notify("カテゴリを追加しました");
@@ -1098,12 +1167,6 @@ function CategoryField({
             placeholder={type === "income" ? "例：ボーナス" : "例：医療費"}
             maxLength={80}
           />
-          <input
-            type="color"
-            value={color}
-            onChange={(e) => setColor(e.target.value)}
-            aria-label="カテゴリの色"
-          />
           <button
             type="button"
             className="secondary"
@@ -1112,6 +1175,7 @@ function CategoryField({
           >
             追加
           </button>
+          <ColorSwatchPicker value={color} onChange={setColor} />
         </div>
       )}
     </div>
@@ -2906,7 +2970,9 @@ function Settings({
   const [restoring, setRestoring] = useState(false);
   const [editing, setEditing] = useState(false);
   const [passwordOpen, setPasswordOpen] = useState(false);
-  const [categoryOpen, setCategoryOpen] = useState(false);
+  const [categoryForm, setCategoryForm] = useState<Category | "new" | null>(
+    null,
+  );
   const [mcpConnection, setMcpConnection] = useState<McpConnection | null>(null);
   const [revealedMcpUrl, setRevealedMcpUrl] = useState("");
   const [users, setUsers] = useState<User[]>([]);
@@ -3055,34 +3121,55 @@ function Settings({
       notify("ユーザー権限を更新しました");
     } else notify("ユーザー権限を更新できませんでした");
   };
-  const addCategory = async (event: FormEvent<HTMLFormElement>) => {
+  const saveCategory = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const fd = new FormData(event.currentTarget);
+    const payload = {
+      name: String(fd.get("name")),
+      type: fd.get("type") as Category["type"],
+      color: String(fd.get("color") || CATEGORY_COLORS[0]),
+    };
+    const editing = categoryForm && categoryForm !== "new" ? categoryForm : null;
     try {
-      let item: Category = {
-        id: crypto.randomUUID(),
-        name: String(fd.get("name")),
-        type: fd.get("type") as Category["type"],
-        color: String(fd.get("color") || CATEGORY_COLORS[0]),
-      };
+      let item: Category = editing
+        ? { ...editing, ...payload }
+        : { id: crypto.randomUUID(), ...payload };
       if (connected) {
-        const response = await apiFetch(`${API}/categories`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            name: item.name,
-            type: item.type,
-            color: item.color,
-          }),
-        });
+        const response = await apiFetch(
+          editing ? `${API}/categories/${editing.id}` : `${API}/categories`,
+          {
+            method: editing ? "PATCH" : "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          },
+        );
+        if (response.status === 409) {
+          const body = await response.json().catch(() => ({}));
+          const detail = String(body.detail || "");
+          throw new Error(
+            detail.includes("in use") ? "in-use-type" : "duplicate",
+          );
+        }
         if (!response.ok) throw new Error();
         item = await response.json();
       }
-      setCategories((all) => [...all, item]);
-      setCategoryOpen(false);
-      notify("カテゴリを追加しました");
-    } catch {
-      notify("同じ名前のカテゴリがあるか、追加できませんでした");
+      setCategories((all) =>
+        editing
+          ? all.map((category) => (category.id === item.id ? item : category))
+          : [...all, item],
+      );
+      setCategoryForm(null);
+      notify(editing ? "カテゴリを更新しました" : "カテゴリを追加しました");
+    } catch (error) {
+      notify(
+        error instanceof Error && error.message === "in-use-type"
+          ? "取引で使っているカテゴリは種類を変更できません"
+          : error instanceof Error && error.message === "duplicate"
+            ? "同じ名前のカテゴリがあります"
+            : editing
+              ? "カテゴリを更新できませんでした"
+              : "同じ名前のカテゴリがあるか、追加できませんでした",
+      );
     }
   };
   const removeCategory = async (item: Category) => {
@@ -3138,11 +3225,11 @@ function Settings({
         <div>
           <h2>カテゴリ</h2>
           <p>
-            取引の分類です。収入と支出で別々に管理し、使っていないものだけ削除できます。
+            取引の分類です。名前・色・種類を編集できます。使っていないものだけ削除できます。
           </p>
         </div>
         <div className="token-toolbar">
-          <button className="secondary" onClick={() => setCategoryOpen(true)}>
+          <button className="secondary" onClick={() => setCategoryForm("new")}>
             ＋ カテゴリを追加
           </button>
         </div>
@@ -3155,14 +3242,28 @@ function Settings({
                 .map((c) => (
                   <div className="category-item" key={c.id}>
                     <i style={{ background: c.color || "#aaa69f" }} />
-                    <span>{c.name}</span>
-                    <button
-                      type="button"
-                      className="danger-link"
-                      onClick={() => removeCategory(c)}
-                    >
-                      削除
-                    </button>
+                    <span>
+                      {c.name}
+                      {categoryColorLabel(c.color) ? (
+                        <small> {categoryColorLabel(c.color)}</small>
+                      ) : null}
+                    </span>
+                    <div className="category-item-actions">
+                      <button
+                        type="button"
+                        className="inline-add"
+                        onClick={() => setCategoryForm(c)}
+                      >
+                        編集
+                      </button>
+                      <button
+                        type="button"
+                        className="danger-link"
+                        onClick={() => removeCategory(c)}
+                      >
+                        削除
+                      </button>
+                    </div>
                   </div>
                 ))}
               {!categories.some((c) => c.type === type) && (
@@ -3412,9 +3513,12 @@ function Settings({
           </form>
         </Modal>
       )}
-      {categoryOpen && (
-        <Modal title="カテゴリを追加" close={() => setCategoryOpen(false)}>
-          <form className="modal-form" onSubmit={addCategory}>
+      {categoryForm && (
+        <Modal
+          title={categoryForm === "new" ? "カテゴリを追加" : "カテゴリを編集"}
+          close={() => setCategoryForm(null)}
+        >
+          <form className="modal-form" onSubmit={saveCategory}>
             <label>
               <span>名前</span>
               <input
@@ -3422,34 +3526,47 @@ function Settings({
                 required
                 maxLength={80}
                 placeholder="例：医療費"
+                defaultValue={
+                  categoryForm === "new" ? "" : categoryForm.name
+                }
               />
             </label>
             <label>
               <span>種類</span>
-              <select name="type" defaultValue="expense">
+              <select
+                name="type"
+                defaultValue={
+                  categoryForm === "new" ? "expense" : categoryForm.type
+                }
+              >
                 <option value="expense">支出</option>
                 <option value="income">収入</option>
               </select>
             </label>
-            <label>
-              <span>色</span>
-              <select name="color">
-                {CATEGORY_COLORS.map((c) => (
-                  <option key={c} value={c}>
-                    {c}
-                  </option>
-                ))}
-              </select>
-            </label>
+            {categoryForm !== "new" && (
+              <p className="form-help">
+                取引や定期で使っているカテゴリは、種類を変更できません。
+              </p>
+            )}
+            <ColorSwatchPicker
+              name="color"
+              defaultValue={
+                categoryForm === "new"
+                  ? nextCategoryColor(categories)
+                  : categoryForm.color || nextCategoryColor(categories)
+              }
+            />
             <div className="modal-actions">
               <button
                 type="button"
                 className="secondary"
-                onClick={() => setCategoryOpen(false)}
+                onClick={() => setCategoryForm(null)}
               >
                 キャンセル
               </button>
-              <button className="primary">追加</button>
+              <button className="primary">
+                {categoryForm === "new" ? "追加" : "変更を保存"}
+              </button>
             </div>
           </form>
         </Modal>

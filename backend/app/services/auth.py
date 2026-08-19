@@ -14,7 +14,7 @@ from app.models.entities import ApiToken, Category, CategoryType, McpConnection,
 
 STARTER_CATEGORIES = [
     ("食費", CategoryType.expense, "#00c4cc"),
-    ("日用品", CategoryType.expense, "#706d65"),
+    ("日用品", CategoryType.expense, "#ff9100"),
     ("住居費", CategoryType.expense, "#2d4b9b"),
     ("交通費", CategoryType.expense, "#69d7ff"),
     ("娯楽", CategoryType.expense, "#e65537"),

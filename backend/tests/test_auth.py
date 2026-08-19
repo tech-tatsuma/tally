@@ -5,7 +5,7 @@ from sqlalchemy import select
 
 from app.core.security import verify_password
 from app.models.entities import Account, AccountType, ApiToken, Category, McpConnection, User, UserRole, UserSession
-from app.services.auth import AuthService
+from app.services.auth import STARTER_CATEGORIES, AuthService
 from app.services.finance import FinanceService
 
 
@@ -16,12 +16,20 @@ async def test_register_login_profile_and_persistent_session(session):
     assert user.role == UserRole.user
     assert (await session.scalar(select(Account).where(Account.user_id == user.id))) is None
     names = {c.name for c in (await session.scalars(select(Category).where(Category.user_id == user.id)))}
+    colors = [c.color for c in (await session.scalars(select(Category).where(Category.user_id == user.id)))]
     assert "食費" in names
     assert "給与" in names
+    assert len(colors) == len(set(colors))
     assert (await auth.authenticate("second@example.com", "StrongPassword123")).id == user.id
     raw, login = await auth.create_session(user, remember_me=True)
     assert raw.startswith("tlly_sess_")
     assert (login.expires_at.replace(tzinfo=timezone.utc) - datetime.now(timezone.utc)).days >= 29
+
+
+def test_starter_categories_use_unique_colors():
+    colors = [color for _, _, color in STARTER_CATEGORIES]
+    assert len(colors) == len(set(colors))
+    assert len(colors) >= 7
 
 
 async def test_admin_email_from_settings_becomes_administrator(session):

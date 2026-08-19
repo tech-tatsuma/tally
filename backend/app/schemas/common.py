@@ -82,6 +82,7 @@ class CategoryRead(ORMModel):
 
 class CategoryUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=80)
+    type: CategoryType | None = None
     icon: str | None = None
     color: str | None = Field(default=None, pattern=r"^#[0-9A-Fa-f]{6}$")
 

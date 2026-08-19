@@ -223,6 +223,10 @@ async def create_category(data: CategoryCreate, session: Session, user_id: UserI
 async def update_category(category_id: uuid.UUID, data: CategoryUpdate, session: Session, user_id: UserId):
     category = await session.scalar(select(Category).where(Category.id == category_id, Category.user_id == user_id))
     if not category: raise HTTPException(404, "Category not found")
+    if data.type is not None and data.type != category.type:
+        in_transactions = await session.scalar(select(func.count(Transaction.id)).where(Transaction.user_id == user_id, Transaction.category_id == category_id)) or 0
+        in_recurring = await session.scalar(select(func.count(RecurringTransaction.id)).where(RecurringTransaction.user_id == user_id, RecurringTransaction.category_id == category_id)) or 0
+        if in_transactions or in_recurring: raise HTTPException(409, "Category is in use")
     for key, value in data.model_dump(exclude_unset=True).items(): setattr(category, key, value)
     try:
         await session.commit(); await session.refresh(category)
