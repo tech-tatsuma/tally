@@ -1,16 +1,19 @@
+import uuid
 from datetime import date, datetime, timezone
 from decimal import Decimal
 
 import pytest
 from fastapi import HTTPException
+from pydantic import ValidationError
 from sqlalchemy import select
 
-from app.models.entities import Account, Category, CategoryType, CreditSettlement, Transaction
+from app.models.entities import Account, AccountType, Category, CategoryType, CreditSettlement, Transaction
 from app.api.router import update_category
-from app.schemas.common import AccountCreate, AccountUpdate, CategoryUpdate, RecurringCreate, RecurringUpdate, TransactionCreate, TransactionUpdate
+from app.schemas.common import AccountCreate, AccountUpdate, BulkTransactionDelete, CategoryUpdate, RecurringCreate, RecurringUpdate, TransactionCreate, TransactionUpdate
 from app.services.analytics import AnalyticsService
 from app.services.backup import BackupService
 from app.services.finance import FinanceService, calendar_date, closing_on_or_after, iter_due_closing_dates, payment_date_for_closing
+from app.services.paypay_import import preview_paypay_import
 from tests.conftest import USER_ID
 
 
@@ -31,6 +34,53 @@ async def test_transaction_create_update_delete_and_balance(session):
     assert await service.account_balance(accounts[0]) == Decimal("10000")
     await service.create_transaction(TransactionCreate(account_id=accounts[0].id, category_id=income.id, type="income", amount="2000", occurred_at=datetime.now(timezone.utc), title="Work"))
     assert await service.account_balance(accounts[0]) == Decimal("12000")
+
+
+async def test_paypay_csv_filters_card_wallet_and_charge_rows(session):
+    accounts, _, _ = await fixtures(session)
+    card = Account(user_id=USER_ID, name="PayPay card", account_type=AccountType.credit)
+    wallet = Account(user_id=USER_ID, name="PayPay", account_type=AccountType.wallet)
+    session.add_all([card, wallet]); await session.commit()
+    csv_data = "\ufeff取引日,出金金額（円）,入金金額（円）,取引内容,取引先,取引方法,取引番号\n2026/09/01 10:00:00,500,-,支払い,カード店,PayPayカード Mastercard,card-1\n2026/09/01 11:00:00,300,-,支払い,残高店,PayPay残高,wallet-1\n2026/09/01 12:00:00,-,1000,チャージ,PayPay,ゆうちょ銀行,charge-1\n".encode()
+    card_rows = await preview_paypay_import(session, USER_ID, card, csv_data)
+    wallet_rows = await preview_paypay_import(session, USER_ID, wallet, csv_data)
+    assert [row["source_id"] for row in card_rows] == ["card-1"]
+    assert [row["kind"] for row in wallet_rows] == ["transaction", "transfer"]
+
+
+async def test_update_transaction_can_change_account(session):
+    accounts, expense, _ = await fixtures(session); service = FinanceService(session, USER_ID)
+    tx = await service.create_transaction(TransactionCreate(account_id=accounts[0].id, category_id=expense.id, type="expense", amount="1200", occurred_at=datetime.now(timezone.utc), title="Moved later"))
+    assert await service.account_balance(accounts[0]) == Decimal("8800")
+    assert await service.account_balance(accounts[1]) == Decimal("5000")
+    updated = await service.update_transaction(tx.id, TransactionUpdate(account_id=accounts[1].id))
+    assert updated.account_id == accounts[1].id
+    assert await service.account_balance(accounts[0]) == Decimal("10000")
+    assert await service.account_balance(accounts[1]) == Decimal("3800")
+
+
+async def test_bulk_category_update_changes_only_selected_transactions(session):
+    accounts, expense, _ = await fixtures(session); service = FinanceService(session, USER_ID)
+    other = Category(user_id=USER_ID, name="Dining", type=CategoryType.expense)
+    session.add(other); await session.commit()
+    first = await service.create_transaction(TransactionCreate(account_id=accounts[0].id, category_id=expense.id, type="expense", amount="500", occurred_at=datetime.now(timezone.utc), title="First"))
+    second = await service.create_transaction(TransactionCreate(account_id=accounts[0].id, category_id=expense.id, type="expense", amount="600", occurred_at=datetime.now(timezone.utc), title="Second"))
+    updated = await service.update_transaction_categories([first.id, second.id], other.id)
+    assert {item.category_id for item in updated} == {other.id}
+
+
+async def test_bulk_delete_removes_both_sides_of_selected_transfer(session):
+    accounts, _, _ = await fixtures(session); service = FinanceService(session, USER_ID)
+    transfer = await service.create_transaction(TransactionCreate(account_id=accounts[0].id, destination_account_id=accounts[1].id, type="transfer", amount="700", occurred_at=datetime.now(timezone.utc), title="Move"))
+    assert await service.delete_transactions([transfer.id]) == 2
+    assert not list(await session.scalars(select(Transaction)))
+
+
+def test_bulk_delete_accepts_more_than_100_ids():
+    BulkTransactionDelete(transaction_ids=[uuid.uuid4() for _ in range(101)])
+    BulkTransactionDelete(transaction_ids=[uuid.uuid4() for _ in range(1000)])
+    with pytest.raises(ValidationError):
+        BulkTransactionDelete(transaction_ids=[uuid.uuid4() for _ in range(1001)])
 
 
 async def test_transfer_preserves_total_assets(session):

@@ -18,14 +18,14 @@ services:
       DATABASE_URL: postgresql+asyncpg://tally:tally@db:5432/tally
       APP_ENV: production
       APP_TIMEZONE: Asia/Tokyo
-      CORS_ORIGINS: http://localhost:3000
+      CORS_ORIGINS: http://localhost:4000
       ADMIN_EMAIL: ${ADMIN_EMAIL:-}
-      MCP_PUBLIC_BASE_URL: ${MCP_PUBLIC_BASE_URL:-http://localhost:8000}
-    ports: ["8000:8000"]
+      MCP_PUBLIC_BASE_URL: ${MCP_PUBLIC_BASE_URL:-http://localhost:4001}
+    ports: ["4001:4001"]
     depends_on:
       db: { condition: service_healthy }
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:4001/health')"]
       interval: 5s
       timeout: 5s
       retries: 12
@@ -43,8 +43,8 @@ services:
       context: .
       dockerfile: Dockerfile.frontend
     environment:
-      NEXT_PUBLIC_API_URL: http://localhost:8000/api/v1
-    ports: ["3000:3000"]
+      NEXT_PUBLIC_API_URL: http://localhost:4001/api/v1
+    ports: ["4000:4000"]
     depends_on:
       backend: { condition: service_healthy }
 volumes:

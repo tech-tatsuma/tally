@@ -2,7 +2,7 @@ import uuid
 from datetime import date, datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, Response
+from fastapi import APIRouter, Body, Depends, File, HTTPException, Query, Request, Response, UploadFile
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -10,12 +10,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import current_user, current_user_id, require_admin
 from app.core.config import get_settings
 from app.db.session import get_session
-from app.models.entities import ApiToken, Category, McpConnection, RecurringTransaction, Transaction, TransactionType, User, UserRole
+from app.models.entities import AccountType, ApiToken, Category, McpConnection, RecurringTransaction, Transaction, TransactionType, User, UserRole
 from app.repositories.finance import FinanceRepository
-from app.schemas.common import AccountCreate, AccountRead, AccountUpdate, CategoryCreate, CategoryRead, CategoryUpdate, CreditSettlementRead, RecurringCreate, RecurringRead, RecurringUpdate, TransactionCreate, TransactionPage, TransactionRead, TransactionUpdate
+from app.schemas.common import AccountCreate, AccountRead, AccountUpdate, BulkTransactionCategoryUpdate, BulkTransactionDelete, CategoryCreate, CategoryRead, CategoryUpdate, CreditSettlementRead, PayPayImportApply, RecurringCreate, RecurringRead, RecurringUpdate, TransactionCreate, TransactionPage, TransactionRead, TransactionUpdate
 from app.services.analytics import AnalyticsService
 from app.services.backup import BackupService
 from app.services.finance import FinanceService
+from app.services.paypay_import import preview_paypay_import
 from app.services.auth import AuthService
 from app.schemas.auth import AdminUserUpdate, ApiTokenCreate, ApiTokenCreated, ApiTokenRead, ForgotPasswordRequest, LoginRequest, McpConnectionCreated, McpConnectionRead, PasswordChangeRequest, ProfileUpdate, RegisterRequest, ResetPasswordRequest, UserRead
 
@@ -198,6 +199,39 @@ async def get_account_balance(account_id: uuid.UUID, session: Session, user_id: 
 async def list_credit_settlements(account_id: uuid.UUID, session: Session, user_id: UserId): return await FinanceService(session, user_id).list_credit_settlements(account_id)
 
 
+@router.post("/accounts/{account_id}/paypay-import/preview")
+async def preview_paypay_csv(account_id: uuid.UUID, session: Session, user_id: UserId, file: UploadFile = File(...)):
+    if not file.filename or not file.filename.lower().endswith(".csv"):
+        raise HTTPException(422, "Please select a CSV file")
+    content = await file.read()
+    if len(content) > 10 * 1024 * 1024:
+        raise HTTPException(413, "CSV must be 10 MB or smaller")
+    account = await FinanceService(session, user_id).repo.account(user_id, account_id)
+    if not account:
+        raise HTTPException(404, "Account not found")
+    return {"items": await preview_paypay_import(session, user_id, account, content)}
+
+
+@router.post("/accounts/{account_id}/paypay-import")
+async def apply_paypay_csv(account_id: uuid.UUID, data: PayPayImportApply, session: Session, user_id: UserId):
+    service = FinanceService(session, user_id)
+    account = await service.repo.account(user_id, account_id)
+    if not account or account.account_type not in {AccountType.credit, AccountType.wallet}:
+        raise HTTPException(422, "PayPay CSV import is available for this account only")
+    created = []
+    for item in data.items:
+        if not item.include:
+            continue
+        if item.kind == "transfer":
+            if account.account_type != AccountType.wallet or not data.transfer_source_account_id:
+                raise HTTPException(422, "Select a transfer source account for PayPay charges")
+            tx = await service.create_transaction(TransactionCreate(account_id=data.transfer_source_account_id, destination_account_id=account.id, type=TransactionType.transfer, amount=item.amount, occurred_at=item.occurred_at, title=item.title, description=item.description))
+        else:
+            tx = await service.create_transaction(TransactionCreate(account_id=account.id, type=item.type, amount=item.amount, occurred_at=item.occurred_at, title=item.title, description=item.description))
+        created.append(str(tx.id))
+    return {"created": len(created), "transaction_ids": created}
+
+
 @router.post("/credit-settlements/process")
 async def process_credit_settlements(session: Session, user_id: UserId, target_date: date = Query(default_factory=date.today)): return {"settled": await FinanceService(session, user_id).process_due_credit_settlements(target_date)}
 
@@ -253,6 +287,16 @@ async def list_transactions(session: Session, user_id: UserId, start: datetime |
 
 @router.post("/transactions", response_model=TransactionRead, status_code=201)
 async def create_transaction(data: TransactionCreate, session: Session, user_id: UserId): return await FinanceService(session, user_id).create_transaction(data)
+
+
+@router.post("/transactions/bulk-category", response_model=list[TransactionRead])
+async def bulk_update_transaction_category(data: BulkTransactionCategoryUpdate, session: Session, user_id: UserId):
+    return await FinanceService(session, user_id).update_transaction_categories(data.transaction_ids, data.category_id)
+
+
+@router.post("/transactions/bulk-delete")
+async def bulk_delete_transactions(data: BulkTransactionDelete, session: Session, user_id: UserId):
+    return {"deleted": await FinanceService(session, user_id).delete_transactions(data.transaction_ids)}
 
 
 @router.get("/transactions/{transaction_id}", response_model=TransactionRead)

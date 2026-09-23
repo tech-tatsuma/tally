@@ -108,12 +108,22 @@ class TransactionCreate(BaseModel):
 
 
 class TransactionUpdate(BaseModel):
+    account_id: uuid.UUID | None = None
     category_id: uuid.UUID | None = None
     amount: Decimal | None = Field(default=None, gt=0, max_digits=18, decimal_places=2)
     occurred_at: datetime | None = None
     title: str | None = Field(default=None, min_length=1, max_length=160)
     description: str | None = None
     journal: str | None = None
+
+
+class BulkTransactionCategoryUpdate(BaseModel):
+    transaction_ids: list[uuid.UUID] = Field(min_length=1, max_length=100)
+    category_id: uuid.UUID
+
+
+class BulkTransactionDelete(BaseModel):
+    transaction_ids: list[uuid.UUID] = Field(min_length=1, max_length=1000)
 
 
 class TransactionRead(ORMModel):
@@ -136,6 +146,22 @@ class TransactionPage(BaseModel):
     total: int
     page: int
     page_size: int
+
+
+class PayPayImportItem(BaseModel):
+    source_id: str = Field(min_length=1, max_length=255)
+    occurred_at: datetime
+    amount: Decimal = Field(gt=0, max_digits=18, decimal_places=2)
+    title: str = Field(min_length=1, max_length=160)
+    description: str | None = None
+    type: TransactionType
+    kind: str = Field(pattern="^(transaction|transfer)$")
+    include: bool = True
+
+
+class PayPayImportApply(BaseModel):
+    items: list[PayPayImportItem] = Field(max_length=1000)
+    transfer_source_account_id: uuid.UUID | None = None
 
 
 class RecurringCreate(BaseModel):

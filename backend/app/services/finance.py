@@ -4,7 +4,7 @@ from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 
 from fastapi import HTTPException
-from sqlalchemy import case, delete, func, select
+from sqlalchemy import case, delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.entities import Account, AccountType, Category, CategoryType, CreditSettlement, RecurringTransaction, Transaction, TransactionType, TransferDirection
@@ -167,9 +167,45 @@ class FinanceService:
         tx = await self.repo.transaction(self.user_id, transaction_id)
         if not tx: raise HTTPException(404, "Transaction not found")
         if tx.type == TransactionType.transfer: raise HTTPException(409, "Edit transfers by replacing the transfer")
-        await self.validate_category(data.category_id if "category_id" in data.model_fields_set else tx.category_id, tx.type)
-        for key, value in data.model_dump(exclude_unset=True).items(): setattr(tx, key, value)
+        values = data.model_dump(exclude_unset=True)
+        if "account_id" in values:
+            account = await self.repo.account(self.user_id, values["account_id"])
+            if not account or account.is_archived: raise HTTPException(422, "Account not found or archived")
+            if account.id != tx.account_id and tx.credit_settlement_id is not None:
+                # Moving a settled credit charge off its card leaves the settlement transfer as-is;
+                # unlink so the charge is no longer counted in that settlement's history.
+                values["credit_settlement_id"] = None
+        await self.validate_category(values["category_id"] if "category_id" in values else tx.category_id, tx.type)
+        for key, value in values.items(): setattr(tx, key, value)
         await self.session.commit(); await self.session.refresh(tx); return tx
+
+    async def update_transaction_categories(self, transaction_ids: list[uuid.UUID], category_id: uuid.UUID) -> list[Transaction]:
+        items = list(await self.session.scalars(select(Transaction).where(Transaction.user_id == self.user_id, Transaction.id.in_(transaction_ids))))
+        if len(items) != len(set(transaction_ids)):
+            raise HTTPException(404, "One or more transactions were not found")
+        if any(item.type == TransactionType.transfer for item in items):
+            raise HTTPException(422, "Transfers cannot have a category")
+        types = {item.type for item in items}
+        if len(types) != 1:
+            raise HTTPException(422, "Select transactions of one type at a time")
+        await self.validate_category(category_id, items[0].type)
+        for item in items: item.category_id = category_id
+        await self.session.commit()
+        for item in items: await self.session.refresh(item)
+        return items
+
+    async def delete_transactions(self, transaction_ids: list[uuid.UUID]) -> int:
+        unique_ids = set(transaction_ids)
+        items = list(await self.session.scalars(select(Transaction).where(Transaction.user_id == self.user_id, Transaction.id.in_(unique_ids))))
+        if len(items) != len(unique_ids):
+            raise HTTPException(404, "One or more transactions were not found")
+        groups = {item.transfer_group_id for item in items if item.transfer_group_id}
+        condition = Transaction.id.in_(unique_ids)
+        if groups:
+            condition = or_(condition, Transaction.transfer_group_id.in_(groups))
+        result = await self.session.execute(delete(Transaction).where(Transaction.user_id == self.user_id, condition))
+        await self.session.commit()
+        return result.rowcount or 0
 
     async def delete_transaction(self, transaction_id: uuid.UUID) -> None:
         tx = await self.repo.transaction(self.user_id, transaction_id)

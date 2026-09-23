@@ -130,8 +130,8 @@ ADMIN_EMAIL=you@example.com docker compose up --build
 
 | 種別 | URL |
 | --- | --- |
-| アプリ | http://localhost:3000 |
-| APIドキュメント | http://localhost:8000/docs |
+| アプリ | http://localhost:4000 |
+| APIドキュメント | http://localhost:4001/docs |
 
 停止する場合は次を実行します。
 

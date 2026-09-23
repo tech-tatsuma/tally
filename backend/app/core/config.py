@@ -9,13 +9,13 @@ class Settings(BaseSettings):
     app_env: str = "development"
     database_url: str = "postgresql+asyncpg://tally:tally@db:5432/tally"
     app_timezone: str = "Asia/Tokyo"
-    cors_origins: str = "http://localhost:3000,http://localhost:5173"
+    cors_origins: str = "http://localhost:4000,http://localhost:5173"
     default_user_id: str = "00000000-0000-0000-0000-000000000001"
     session_days: int = 30
     password_reset_minutes: int = 30
     cookie_name: str = "tally_session"
     cookie_secure: bool = False
-    frontend_url: str = "http://localhost:3000"
+    frontend_url: str = "http://localhost:4000"
     smtp_host: str | None = None
     smtp_port: int = 587
     smtp_username: str | None = None

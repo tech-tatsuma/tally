@@ -35,6 +35,11 @@ test("includes login, password recovery, profile, and role-aware management", as
   assert.match(app, /カテゴリを追加/);
   assert.match(app, /user\.role === "admin"/);
   assert.match(app, /MCP連携/);
+  assert.match(app, /PayPay CSVを読み込む/);
+  assert.match(app, /重複候補/);
+  assert.match(app, /bulk-category/);
+  assert.match(app, /まとめて変更/);
+  assert.match(app, /まとめて削除/);
   assert.match(app, /donutGradient/);
   assert.match(app, /style=\{\{ background: donutGradient\(categoryTotals\) \}\}/);
   assert.doesNotMatch(

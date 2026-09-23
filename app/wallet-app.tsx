@@ -2,6 +2,7 @@
 /* eslint-disable jsx-a11y/click-events-have-key-events, jsx-a11y/no-static-element-interactions, jsx-a11y/no-noninteractive-element-interactions, no-irregular-whitespace */
 
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import "./paypay-import.css";
 
 type Account = {
   id: string;
@@ -44,6 +45,19 @@ type CreditSettlement = {
   period_key: string;
   amount: number;
   settled_on: string;
+};
+type PayPayImportRow = {
+  source_id: string;
+  occurred_at: string;
+  amount: string;
+  title: string;
+  description?: string;
+  type: "income" | "expense" | "transfer";
+  kind: "transaction" | "transfer";
+  transaction_method: string;
+  duplicate: boolean;
+  duplicate_title?: string | null;
+  include: boolean;
 };
 const accountTypeLabel: Record<string, string> = {
   bank: "銀行",
@@ -138,7 +152,7 @@ type McpConnection = {
   created_at: string;
 };
 
-const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api/v1";
+const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:4001/api/v1";
 const apiFetch = (input: string, init: RequestInit = {}) =>
   fetch(input, { ...init, credentials: "include" });
 
@@ -1253,18 +1267,24 @@ function TransactionList({
   accounts,
   categories,
   onClick,
+  selectedIds,
+  onToggle,
 }: {
   items: Transaction[];
   accounts: Account[];
   categories: Category[];
   onClick?: (t: Transaction) => void;
+  selectedIds?: Set<string>;
+  onToggle?: (t: Transaction) => void;
 }) {
   return (
     <div className="transaction-list">
       {items.map((t) => {
         const category = categories.find((c) => c.id === t.category_id);
         return (
-          <button key={t.id} onClick={() => onClick?.(t)}>
+          <div key={t.id} className="transaction-row">
+            {onToggle && <input aria-label={`${t.title}を選択`} type="checkbox" checked={selectedIds?.has(t.id) || false} onChange={() => onToggle(t)} />}
+          <button onClick={() => onClick?.(t)}>
             <span className="date-cell">{shortDate(t.occurred_at)}</span>
             <span
               className="category-dot"
@@ -1284,6 +1304,7 @@ function TransactionList({
               {money(t.amount)}
             </b>
           </button>
+          </div>
         );
       })}
     </div>
@@ -1305,11 +1326,72 @@ function Transactions({
   const [type, setType] = useState("all");
   const [selected, setSelected] = useState<Transaction | null>(null);
   const [editing, setEditing] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [bulkCategoryId, setBulkCategoryId] = useState("");
+  const [bulkSaving, setBulkSaving] = useState(false);
   const filtered = transactions.filter(
     (t) =>
       (type === "all" || t.type === type) &&
       t.title.toLowerCase().includes(query.toLowerCase()),
   );
+  const selectedForBulk = filtered.filter((item) => selectedIds.has(item.id) && item.type !== "transfer");
+  const selectedItems = filtered.filter((item) => selectedIds.has(item.id));
+  const selectedTypes = new Set(selectedForBulk.map((item) => item.type));
+  const bulkCategories = selectedTypes.size === 1 ? categories.filter((item) => item.type === selectedForBulk[0]?.type) : [];
+  const toggleBulkSelection = (item: Transaction) => setSelectedIds((current) => {
+    const next = new Set(current); if (next.has(item.id)) next.delete(item.id); else next.add(item.id); return next;
+  });
+  const applyBulkCategory = async () => {
+    if (!bulkCategoryId || !selectedForBulk.length || selectedTypes.size !== 1) return;
+    setBulkSaving(true);
+    try {
+      const response = await apiFetch(`${API}/transactions/bulk-category`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ transaction_ids: selectedForBulk.map((item) => item.id), category_id: bulkCategoryId }) });
+      if (!response.ok) throw new Error(await response.text());
+      const updated: Transaction[] = await response.json();
+      const map = new Map(updated.map((item) => [item.id, item]));
+      setTransactions((items) => items.map((item) => map.get(item.id) || item));
+      setSelectedIds(new Set()); setBulkCategoryId("");
+      notify(`${updated.length}件のカテゴリを変更しました`);
+    } catch { notify("カテゴリを一括変更できませんでした"); }
+    finally { setBulkSaving(false); }
+  };
+  const deleteBulk = async () => {
+    if (!selectedItems.length || !confirm(`${selectedItems.length}件の取引を削除しますか？ 振替を選んだ場合は相手側の明細も削除されます。`)) return;
+    setBulkSaving(true);
+    try {
+      if (connected) {
+        const groups = new Map<string, string[]>();
+        for (const item of selectedItems) {
+          const key = item.transfer_group_id || item.id;
+          groups.set(key, [...(groups.get(key) || []), item.id]);
+        }
+        const chunks: string[][] = [];
+        let current: string[] = [];
+        for (const ids of groups.values()) {
+          if (current.length > 0 && current.length + ids.length > 1000) {
+            chunks.push(current);
+            current = [];
+          }
+          current.push(...ids);
+        }
+        if (current.length) chunks.push(current);
+        for (const transactionIds of chunks) {
+          const response = await apiFetch(`${API}/transactions/bulk-delete`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ transaction_ids: transactionIds }) });
+          if (!response.ok) throw new Error(await response.text());
+        }
+        setAccounts(await fetchAccounts());
+        setTransactions(await fetchAllTransactions());
+      } else {
+        const related = selectedItems.flatMap((item) => relatedTransactions(transactions, item));
+        const ids = new Set(related.map((item) => item.id));
+        setAccounts((items) => applyAccountImpact(items, related, -1));
+        setTransactions((items) => items.filter((item) => !ids.has(item.id)));
+      }
+      setSelectedIds(new Set()); setBulkCategoryId("");
+      notify(`${selectedItems.length}件の取引を削除しました`);
+    } catch { notify("取引をまとめて削除できませんでした"); }
+    finally { setBulkSaving(false); }
+  };
   const remove = async (t: Transaction) => {
     if (!confirm(`「${t.title}」を削除しますか？`)) return;
     const related = relatedTransactions(transactions, t);
@@ -1408,13 +1490,16 @@ function Transactions({
       <section className="panel">
         <div className="table-caption">
           <span>{filtered.length}件の取引</span>
-          <span>新しい順</span>
+          <span>{selectedItems.length ? `${selectedItems.length}件選択中` : "新しい順"}</span>
         </div>
+        {selectedItems.length > 0 && <div className="bulk-category-bar"><span>選択した取引のカテゴリ</span>{selectedForBulk.length > 0 && (selectedTypes.size === 1 ? <><select aria-label="一括変更するカテゴリ" value={bulkCategoryId} onChange={(event) => setBulkCategoryId(event.target.value)}><option value="">カテゴリを選択</option>{bulkCategories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select><button className="primary" disabled={!bulkCategoryId || bulkSaving} onClick={applyBulkCategory}>{bulkSaving ? "変更中…" : "まとめて変更"}</button></> : <small>収入と支出は分けて選択してください</small>)}<button className="danger-link" disabled={bulkSaving} onClick={deleteBulk}>{bulkSaving ? "処理中…" : "まとめて削除"}</button><button className="secondary" onClick={() => { setSelectedIds(new Set()); setBulkCategoryId(""); }}>選択解除</button></div>}
         <TransactionList
           items={filtered}
           accounts={accounts}
           categories={categories}
           onClick={setSelected}
+          selectedIds={selectedIds}
+          onToggle={toggleBulkSelection}
         />
       </section>
       {selected && (
@@ -1430,6 +1515,7 @@ function Transactions({
             {editing ? (
               <TransactionEditor
                 item={selected}
+                accounts={accounts}
                 categories={categories}
                 setCategories={setCategories}
                 connected={connected}
@@ -1500,6 +1586,7 @@ function Transactions({
 
 function TransactionEditor({
   item,
+  accounts,
   categories,
   setCategories,
   connected,
@@ -1508,6 +1595,7 @@ function TransactionEditor({
   saved,
 }: {
   item: Transaction;
+  accounts: Account[];
   categories: Category[];
   setCategories: PageProps["setCategories"];
   connected: boolean;
@@ -1522,6 +1610,7 @@ function TransactionEditor({
     setSaving(true);
     const fd = new FormData(event.currentTarget);
     const payload = {
+      account_id: fd.get("account_id"),
       category_id: fd.get("category_id"),
       amount: fd.get("amount"),
       occurred_at: new Date(`${fd.get("date")}T12:00:00+09:00`).toISOString(),
@@ -1533,6 +1622,7 @@ function TransactionEditor({
       let updated: Transaction = {
         ...item,
         ...payload,
+        account_id: String(payload.account_id),
         amount: Number(payload.amount),
       };
       if (connected) {
@@ -1583,6 +1673,16 @@ function TransactionEditor({
             />
           </label>
         </div>
+        <label>
+          <span>口座</span>
+          <select required name="account_id" defaultValue={item.account_id}>
+            {accounts.map((a) => (
+              <option value={a.id} key={a.id}>
+                {a.name}
+              </option>
+            ))}
+          </select>
+        </label>
         <CategoryField
           type={kind}
           categories={categories}
@@ -2077,6 +2177,7 @@ function AccountDetail({
   categories,
   transactions,
   setAccounts,
+  setTransactions,
   go,
   notify,
   connected,
@@ -2084,6 +2185,10 @@ function AccountDetail({
   const [editing, setEditing] = useState(false);
   const [editType, setEditType] = useState("bank");
   const [settlements, setSettlements] = useState<CreditSettlement[]>([]);
+  const [payPayImportOpen, setPayPayImportOpen] = useState(false);
+  const [payPayRows, setPayPayRows] = useState<PayPayImportRow[]>([]);
+  const [transferSourceAccountId, setTransferSourceAccountId] = useState("");
+  const [importing, setImporting] = useState(false);
   const account = accounts.find((a) => a.id === id);
   useEffect(() => {
     const request =
@@ -2185,6 +2290,41 @@ function AccountDetail({
       notify("口座を削除できませんでした");
     }
   };
+  const previewPayPayCsv = async (file?: File) => {
+    if (!file || !account) return;
+    setImporting(true);
+    try {
+      const body = new FormData();
+      body.append("file", file);
+      const response = await apiFetch(`${API}/accounts/${account.id}/paypay-import/preview`, { method: "POST", body });
+      if (!response.ok) throw new Error(await response.text());
+      const result = await response.json();
+      setPayPayRows((result.items || []).map((item: Omit<PayPayImportRow, "include">) => ({ ...item, include: !item.duplicate })));
+      setTransferSourceAccountId(paymentCandidates[0]?.id || "");
+      setPayPayImportOpen(true);
+      if (!result.items?.length) notify("この口座に取り込めるPayPay取引はありませんでした");
+    } catch {
+      notify("PayPayのCSVを読み込めませんでした。取引履歴CSVを選択してください");
+    } finally { setImporting(false); }
+  };
+  const applyPayPayImport = async () => {
+    if (!account) return;
+    const selected = payPayRows.filter((item) => item.include);
+    if (!selected.length) { notify("追加する取引を選択してください"); return; }
+    if (selected.some((item) => item.kind === "transfer") && !transferSourceAccountId) { notify("チャージの振替元口座を選択してください"); return; }
+    setImporting(true);
+    try {
+      const response = await apiFetch(`${API}/accounts/${account.id}/paypay-import`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ items: selected, transfer_source_account_id: transferSourceAccountId || null }) });
+      if (!response.ok) throw new Error(await response.text());
+      const result = await response.json();
+      const all = await apiFetch(`${API}/transactions?page_size=100`);
+      if (all.ok) setTransactions((await all.json()).items);
+      setPayPayImportOpen(false);
+      notify(`${result.created}件のPayPay取引を追加しました`);
+    } catch { notify("PayPay取引を追加できませんでした"); }
+    finally { setImporting(false); }
+  };
+  const paymentCandidates = accounts.filter((item) => item.account_type !== "credit" && item.id !== account?.id);
   return (
     <div className="page">
       <button className="back-link" onClick={() => go("/accounts")}>
@@ -2195,6 +2335,7 @@ function AccountDetail({
         title={account.name}
         action={
           <div className="header-actions">
+            {(account.account_type === "credit" || account.account_type === "wallet") && <label className="secondary csv-import-button">{importing ? "CSVを読み込み中…" : "PayPay CSVを読み込む"}<input type="file" accept=".csv,text/csv" disabled={importing} onChange={(event) => { previewPayPayCsv(event.target.files?.[0]); event.currentTarget.value = ""; }} /></label>}
             <button className="secondary" onClick={openEdit}>
               口座を編集
             </button>
@@ -2345,6 +2486,17 @@ function AccountDetail({
               <button className="primary">変更を保存</button>
             </div>
           </form>
+        </Modal>
+      )}
+      {payPayImportOpen && (
+        <Modal title="PayPay取引を確認して追加" close={() => setPayPayImportOpen(false)}>
+          <div className="paypay-import">
+            <p>口座種別に合う取引だけを抽出しました。赤い行は同じ日付・金額の既存取引が見つかった候補です。</p>
+            {payPayRows.some((item) => item.kind === "transfer") && <label><span>チャージの振替元口座</span><select value={transferSourceAccountId} onChange={(event) => setTransferSourceAccountId(event.target.value)}><option value="">選択してください</option>{paymentCandidates.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>}
+            <div className="paypay-import-list">{payPayRows.map((item, index) => <article key={`${item.source_id}-${index}`} className={item.duplicate ? "duplicate" : ""}><label><input type="checkbox" checked={item.include} onChange={(event) => setPayPayRows((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, include: event.target.checked } : row))} /><span><strong>{item.title}</strong><small>{new Date(item.occurred_at).toLocaleDateString("ja-JP")} · {item.kind === "transfer" ? "チャージ（振替）" : item.transaction_method}</small>{item.duplicate && <em>重複候補：既存の「{item.duplicate_title || "取引"}」を確認してください</em>}</span><b className={item.type === "income" || item.kind === "transfer" ? "amount-in" : ""}>{item.kind === "transfer" ? "振替 " : item.type === "income" ? "+" : "−"}{money(item.amount)}</b></label>{item.duplicate && <button className="danger-link" onClick={() => setPayPayRows((rows) => rows.map((row, rowIndex) => rowIndex === index ? { ...row, include: false } : row))}>追加しない</button>}</article>)}</div>
+            {!payPayRows.length && <p className="muted-text">取り込める取引はありません。</p>}
+            <div className="modal-actions"><button className="secondary" onClick={() => setPayPayImportOpen(false)}>キャンセル</button><button className="primary" disabled={importing || !payPayRows.some((item) => item.include)} onClick={applyPayPayImport}>{importing ? "追加中…" : "選択した取引を追加"}</button></div>
+          </div>
         </Modal>
       )}
     </div>
