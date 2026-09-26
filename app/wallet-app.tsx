@@ -976,7 +976,7 @@ function Dashboard({ accounts, categories, transactions, go }: PageProps) {
             )}
           </div>
         </section>
-        <section className="panel span-2">
+        <section className="panel span-2 recent-transactions">
           <SectionHead
             title="最近の取引"
             link="すべて見る"
@@ -984,7 +984,8 @@ function Dashboard({ accounts, categories, transactions, go }: PageProps) {
           />
           {transactions.length ? (
             <TransactionList
-              items={sortTransactionsByDate(transactions).slice(0, 5)}
+              detailed
+              items={sortTransactionsByDate(transactions).slice(0, 8)}
               accounts={accounts}
               categories={categories}
               onClick={() => go("/transactions")}
@@ -992,14 +993,6 @@ function Dashboard({ accounts, categories, transactions, go }: PageProps) {
           ) : (
             <p className="empty-inline">まだ取引がありません</p>
           )}
-        </section>
-        <section className="panel journal-card">
-          <p className="eyebrow">TODAY&apos;S NOTE</p>
-          <h2>お金と一緒に、今日を残す</h2>
-          <p>取引の記録には、その日の出来事や気持ちも書き残せます。</p>
-          <button className="secondary" onClick={() => go("/transactions/new")}>
-            今日の記録を書く →
-          </button>
         </section>
       </div>
     </div>
@@ -1266,6 +1259,12 @@ function AssetChart({
   );
 }
 
+const transactionKindLabel: Record<Transaction["type"], string> = {
+  income: "収入",
+  expense: "支出",
+  transfer: "振替",
+};
+
 function TransactionList({
   items,
   accounts,
@@ -1273,6 +1272,7 @@ function TransactionList({
   onClick,
   selectedIds,
   onToggle,
+  detailed = false,
 }: {
   items: Transaction[];
   accounts: Account[];
@@ -1280,29 +1280,62 @@ function TransactionList({
   onClick?: (t: Transaction) => void;
   selectedIds?: Set<string>;
   onToggle?: (t: Transaction) => void;
+  detailed?: boolean;
 }) {
   return (
-    <div className="transaction-list">
+    <div className={detailed ? "transaction-list detailed" : "transaction-list"}>
+      {detailed && (
+        <div className="transaction-detail-head">
+          <span>日付</span>
+          <span className="detail-category">
+            <span className="category-dot" aria-hidden="true" />
+            <span>カテゴリ</span>
+          </span>
+          <span>内容</span>
+          <span>口座</span>
+          <span>メモ</span>
+          <span>金額</span>
+        </div>
+      )}
       {items.map((t) => {
         const category = categories.find((c) => c.id === t.category_id);
+        const accountName = accounts.find((a) => a.id === t.account_id)?.name;
+        const note = t.description || t.journal;
         return (
           <div key={t.id} className="transaction-row">
             {onToggle && <input aria-label={`${t.title}を選択`} type="checkbox" checked={selectedIds?.has(t.id) || false} onChange={() => onToggle(t)} />}
           <button onClick={() => onClick?.(t)}>
             <span className="date-cell">{shortDate(t.occurred_at)}</span>
-            <span
-              className="category-dot"
-              style={{ background: category?.color || "#aaa69f" }}
-            >
-              {(category?.name || "振")[0]}
-            </span>
+            {detailed ? (
+              <span className="detail-category">
+                <span
+                  className="category-dot"
+                  style={{ background: category?.color || "#aaa69f" }}
+                >
+                  {(category?.name || "振")[0]}
+                </span>
+                <span>{category?.name || "口座振替"}</span>
+              </span>
+            ) : (
+              <span
+                className="category-dot"
+                style={{ background: category?.color || "#aaa69f" }}
+              >
+                {(category?.name || "振")[0]}
+              </span>
+            )}
             <span className="transaction-main">
               <strong>{t.title}</strong>
-              <small>
-                {category?.name || "口座振替"} ·{" "}
-                {accounts.find((a) => a.id === t.account_id)?.name}
-              </small>
+              {detailed ? (
+                <small>{transactionKindLabel[t.type]}</small>
+              ) : (
+                <small>
+                  {category?.name || "口座振替"} · {accountName}
+                </small>
+              )}
             </span>
+            {detailed && <span className="detail-account">{accountName}</span>}
+            {detailed && <span className="detail-note">{note}</span>}
             <b className={t.type === "income" ? "amount-in" : ""}>
               {t.type === "income" ? "+" : "−"}
               {money(t.amount)}
