@@ -40,6 +40,8 @@ test("includes login, password recovery, profile, and role-aware management", as
   assert.match(app, /bulk-category/);
   assert.match(app, /まとめて変更/);
   assert.match(app, /まとめて削除/);
+  assert.match(app, /sortTransactionsByDate/);
+  assert.match(app, /取引日が新しい順/);
   assert.match(app, /donutGradient/);
   assert.match(app, /style=\{\{ background: donutGradient\(categoryTotals\) \}\}/);
   assert.doesNotMatch(

@@ -225,6 +225,10 @@ const relatedTransactions = (all: Transaction[], t: Transaction) =>
         (x) => x.id === t.id || x.transfer_group_id === t.transfer_group_id,
       )
     : [t];
+const byNewestTransactionDate = (a: Transaction, b: Transaction) =>
+  new Date(b.occurred_at).getTime() - new Date(a.occurred_at).getTime();
+const sortTransactionsByDate = (items: Transaction[]) =>
+  [...items].sort(byNewestTransactionDate);
 async function fetchAccounts(): Promise<Account[]> {
   const response = await apiFetch(`${API}/accounts`);
   if (!response.ok) throw new Error("accounts");
@@ -980,7 +984,7 @@ function Dashboard({ accounts, categories, transactions, go }: PageProps) {
           />
           {transactions.length ? (
             <TransactionList
-              items={transactions.slice(0, 5)}
+              items={sortTransactionsByDate(transactions).slice(0, 5)}
               accounts={accounts}
               categories={categories}
               onClick={() => go("/transactions")}
@@ -1329,10 +1333,12 @@ function Transactions({
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [bulkCategoryId, setBulkCategoryId] = useState("");
   const [bulkSaving, setBulkSaving] = useState(false);
-  const filtered = transactions.filter(
-    (t) =>
-      (type === "all" || t.type === type) &&
-      t.title.toLowerCase().includes(query.toLowerCase()),
+  const filtered = sortTransactionsByDate(
+    transactions.filter(
+      (t) =>
+        (type === "all" || t.type === type) &&
+        t.title.toLowerCase().includes(query.toLowerCase()),
+    ),
   );
   const selectedForBulk = filtered.filter((item) => selectedIds.has(item.id) && item.type !== "transfer");
   const selectedItems = filtered.filter((item) => selectedIds.has(item.id));
@@ -1438,7 +1444,9 @@ function Transactions({
       );
     }
     setTransactions((all) =>
-      all.map((x) => (x.id === updated.id ? updated : x)),
+      sortTransactionsByDate(
+        all.map((x) => (x.id === updated.id ? updated : x)),
+      ),
     );
     setSelected(updated);
     setEditing(false);
@@ -1490,7 +1498,7 @@ function Transactions({
       <section className="panel">
         <div className="table-caption">
           <span>{filtered.length}件の取引</span>
-          <span>{selectedItems.length ? `${selectedItems.length}件選択中` : "新しい順"}</span>
+          <span>{selectedItems.length ? `${selectedItems.length}件選択中` : "取引日が新しい順"}</span>
         </div>
         {selectedItems.length > 0 && <div className="bulk-category-bar"><span>選択した取引のカテゴリ</span>{selectedForBulk.length > 0 && (selectedTypes.size === 1 ? <><select aria-label="一括変更するカテゴリ" value={bulkCategoryId} onChange={(event) => setBulkCategoryId(event.target.value)}><option value="">カテゴリを選択</option>{bulkCategories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select><button className="primary" disabled={!bulkCategoryId || bulkSaving} onClick={applyBulkCategory}>{bulkSaving ? "変更中…" : "まとめて変更"}</button></> : <small>収入と支出は分けて選択してください</small>)}<button className="danger-link" disabled={bulkSaving} onClick={deleteBulk}>{bulkSaving ? "処理中…" : "まとめて削除"}</button><button className="secondary" onClick={() => { setSelectedIds(new Set()); setBulkCategoryId(""); }}>選択解除</button></div>}
         <TransactionList
@@ -1768,7 +1776,7 @@ function TransactionForm({
         if (kind === "transfer") {
           setTransactions(await fetchAllTransactions());
         } else {
-          setTransactions((all) => [tx, ...all]);
+          setTransactions((all) => sortTransactionsByDate([tx, ...all]));
         }
       } else {
         const amount = Number(payload.amount);
@@ -1786,7 +1794,7 @@ function TransactionForm({
               ]
             : [{ ...tx, amount }];
         setAccounts((all) => applyAccountImpact(all, created, 1));
-        setTransactions((all) => [...created, ...all]);
+        setTransactions((all) => sortTransactionsByDate([...created, ...all]));
       }
       notify("取引を保存しました");
       go("/transactions");
@@ -2207,7 +2215,9 @@ function AccountDetail({
         <button onClick={() => go("/accounts")}>口座一覧へ</button>
       </div>
     );
-  const items = transactions.filter((t) => t.account_id === id);
+  const items = sortTransactionsByDate(
+    transactions.filter((t) => t.account_id === id),
+  );
   const series = monthlySeries(accounts, transactions, 7, id);
   const sixMonthDelta = series.length
     ? series[series.length - 1].value - series[0].value
