@@ -18,6 +18,12 @@ type Account = {
   credit_payment_month_offset?: number | null;
   credit_payment_account_id?: string | null;
 };
+type AccountValuation = {
+  id: string;
+  account_id: string;
+  valued_on: string;
+  amount: number | string;
+};
 type Category = {
   id: string;
   name: string;
@@ -103,21 +109,19 @@ const nextCategoryColor = (categories: Category[]) => {
     CATEGORY_COLORS[categories.length % CATEGORY_COLORS.length]
   );
 };
-const donutGradient = (slices: { color: string; amount: number }[]) => {
-  const total = slices.reduce((n, slice) => n + slice.amount, 0);
-  if (total <= 0) return `conic-gradient(${FALLBACK_CATEGORY_COLOR} 0 100%)`;
-  let start = 0;
-  return `conic-gradient(${slices
-    .map((slice, index) => {
-      const end =
-        index === slices.length - 1
-          ? 100
-          : Math.min(100, start + (slice.amount / total) * 100);
-      const stop = `${slice.color} ${start}% ${end}%`;
-      start = end;
-      return stop;
-    })
-    .join(", ")})`;
+const categoryIdFrom = (target: EventTarget | null) => {
+  if (!(target instanceof Element)) return null;
+  return target.closest("[data-category-id]")?.getAttribute("data-category-id") ?? null;
+};
+const barFocusFrom = (
+  target: EventTarget | null,
+): { key: string; kind: "income" | "expense" } | null => {
+  if (!(target instanceof Element)) return null;
+  const node = target.closest("[data-bar-key]");
+  const key = node?.getAttribute("data-bar-key");
+  const kind = node?.getAttribute("data-bar-kind");
+  if (!key || (kind !== "income" && kind !== "expense")) return null;
+  return { key, kind };
 };
 type Recurring = {
   id: string;
@@ -234,31 +238,64 @@ async function fetchAccounts(): Promise<Account[]> {
   if (!response.ok) throw new Error("accounts");
   return response.json();
 }
+const tokyoDay = (at: Date) =>
+  new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Tokyo" }).format(at);
+const markedInvestmentBalance = (
+  account: Account,
+  transactions: Transaction[],
+  valuations: AccountValuation[],
+  at: Date,
+) => {
+  const day = tokyoDay(at);
+  const marks = valuations
+    .filter((v) => v.account_id === account.id && v.valued_on <= day)
+    .sort((a, b) => (a.valued_on < b.valued_on ? 1 : -1));
+  if (marks.length) return Number(marks[0].amount);
+  return (
+    Number(account.initial_balance || 0) +
+    transactions
+      .filter(
+        (t) => t.account_id === account.id && new Date(t.occurred_at) <= at,
+      )
+      .reduce((n, t) => n + signedImpact(t), 0)
+  );
+};
 const assetsAt = (
   accounts: Account[],
   transactions: Transaction[],
   at: Date,
   accountId?: string,
+  valuations: AccountValuation[] = [],
 ) => {
-  const current = accounts
-    .filter((a) => !accountId || a.id === accountId)
-    .reduce((n, a) => n + Number(a.current_balance), 0);
-  return (
-    current -
-    transactions
-      .filter(
-        (t) =>
-          new Date(t.occurred_at) > at &&
-          (!accountId || t.account_id === accountId),
-      )
-      .reduce((n, t) => n + signedImpact(t), 0)
+  const scoped = accounts.filter((a) => !accountId || a.id === accountId);
+  const usesMarks = (account: Account) =>
+    account.account_type === "investment" &&
+    valuations.some((v) => v.account_id === account.id);
+  const marked = scoped.filter(usesMarks);
+  const plain = scoped.filter((account) => !usesMarks(account));
+  const markedIds = new Set(marked.map((account) => account.id));
+  const plainNow = plain.reduce((n, a) => n + Number(a.current_balance), 0);
+  const later = transactions
+    .filter(
+      (t) =>
+        new Date(t.occurred_at) > at &&
+        (!accountId || t.account_id === accountId) &&
+        !markedIds.has(t.account_id),
+    )
+    .reduce((n, t) => n + signedImpact(t), 0);
+  const markedTotal = marked.reduce(
+    (n, account) =>
+      n + markedInvestmentBalance(account, transactions, valuations, at),
+    0,
   );
+  return plainNow - later + markedTotal;
 };
 const monthlySeries = (
   accounts: Account[],
   transactions: Transaction[],
   count: number,
   accountId?: string,
+  valuations: AccountValuation[] = [],
 ) => {
   const now = new Date();
   return Array.from({ length: count }, (_, index) => {
@@ -277,7 +314,7 @@ const monthlySeries = (
           );
     return {
       label: `${at.getMonth() + 1}月`,
-      value: assetsAt(accounts, transactions, at, accountId),
+      value: assetsAt(accounts, transactions, at, accountId, valuations),
     };
   });
 };
@@ -575,6 +612,7 @@ export function WalletApp() {
   const [categories, setCategories] = useState<Category[]>([]);
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [recurring, setRecurring] = useState<Recurring[]>([]);
+  const [valuations, setValuations] = useState<AccountValuation[]>([]);
   const [connected, setConnected] = useState(false);
   const [user, setUser] = useState<User | null>(null);
   const [authState, setAuthState] = useState<
@@ -588,17 +626,19 @@ export function WalletApp() {
   };
 
   const loadFinanceData = async () => {
-    const [a, c, t, r] = await Promise.all([
+    const [a, c, t, r, v] = await Promise.all([
       apiFetch(`${API}/accounts`),
       apiFetch(`${API}/categories`),
       fetchAllTransactions(),
       apiFetch(`${API}/recurring-transactions`),
+      apiFetch(`${API}/account-valuations`),
     ]);
-    if (![a, c, r].every((x) => x.ok)) throw new Error();
+    if (![a, c, r, v].every((x) => x.ok)) throw new Error();
     setAccounts(await a.json());
     setCategories(await c.json());
     setTransactions(t);
     setRecurring(await r.json());
+    setValuations(await v.json());
     setConnected(true);
   };
 
@@ -657,6 +697,7 @@ export function WalletApp() {
     setCategories([]);
     setTransactions([]);
     setRecurring([]);
+    setValuations([]);
     setConnected(false);
     go("/");
   };
@@ -669,10 +710,12 @@ export function WalletApp() {
     categories,
     transactions,
     recurring,
+    valuations,
     connected,
     setTransactions,
     setAccounts,
     setRecurring,
+    setValuations,
     setCategories,
     go,
     notify,
@@ -784,6 +827,7 @@ type PageProps = {
   categories: Category[];
   transactions: Transaction[];
   recurring: Recurring[];
+  valuations: AccountValuation[];
   connected: boolean;
   setTransactions: (
     value: Transaction[] | ((current: Transaction[]) => Transaction[]),
@@ -791,6 +835,11 @@ type PageProps = {
   setAccounts: (value: Account[] | ((current: Account[]) => Account[])) => void;
   setRecurring: (
     value: Recurring[] | ((current: Recurring[]) => Recurring[]),
+  ) => void;
+  setValuations: (
+    value:
+      | AccountValuation[]
+      | ((current: AccountValuation[]) => AccountValuation[]),
   ) => void;
   setCategories: (
     value: Category[] | ((current: Category[]) => Category[]),
@@ -819,7 +868,13 @@ function PageHeader({
   );
 }
 
-function Dashboard({ accounts, categories, transactions, go }: PageProps) {
+function Dashboard({
+  accounts,
+  categories,
+  transactions,
+  valuations,
+  go,
+}: PageProps) {
   const thisMonth = monthWindow(0);
   const lastMonth = monthWindow(-1);
   const monthTx = transactions.filter((t) =>
@@ -845,6 +900,8 @@ function Dashboard({ accounts, categories, transactions, go }: PageProps) {
     accounts,
     transactions,
     new Date(thisMonth.start.getTime() - 1),
+    undefined,
+    valuations,
   );
   const assetDeltaPct =
     lastAssets === 0
@@ -854,7 +911,7 @@ function Dashboard({ accounts, categories, transactions, go }: PageProps) {
     ? Math.round(((monthIncome - monthExpense) / monthIncome) * 100)
     : null;
   const series = accounts.length
-    ? monthlySeries(accounts, transactions, 7)
+    ? monthlySeries(accounts, transactions, 7, undefined, valuations)
     : [];
   const sixMonthDelta = series.length
     ? series[series.length - 1].value - series[0].value
@@ -891,7 +948,7 @@ function Dashboard({ accounts, categories, transactions, go }: PageProps) {
         </div>
         {accounts.length ? (
           <MiniLine
-            values={monthlySeries(accounts, transactions, 10).map(
+            values={monthlySeries(accounts, transactions, 10, undefined, valuations).map(
               (p) => p.value,
             )}
           />
@@ -2217,8 +2274,10 @@ function AccountDetail({
   accounts,
   categories,
   transactions,
+  valuations,
   setAccounts,
   setTransactions,
+  setValuations,
   go,
   notify,
   connected,
@@ -2230,6 +2289,12 @@ function AccountDetail({
   const [payPayRows, setPayPayRows] = useState<PayPayImportRow[]>([]);
   const [transferSourceAccountId, setTransferSourceAccountId] = useState("");
   const [importing, setImporting] = useState(false);
+  const [addingValuation, setAddingValuation] = useState(false);
+  const [valuationDate, setValuationDate] = useState(() =>
+    toDateInput(new Date().toISOString()),
+  );
+  const [valuationAmount, setValuationAmount] = useState("");
+  const [savingValuation, setSavingValuation] = useState(false);
   const account = accounts.find((a) => a.id === id);
   useEffect(() => {
     const request =
@@ -2251,7 +2316,71 @@ function AccountDetail({
   const items = sortTransactionsByDate(
     transactions.filter((t) => t.account_id === id),
   );
-  const series = monthlySeries(accounts, transactions, 7, id);
+  const accountValuations = valuations
+    .filter((v) => v.account_id === id)
+    .sort((a, b) => (a.valued_on < b.valued_on ? 1 : -1));
+  const series = monthlySeries(accounts, transactions, 7, id, valuations);
+  const saveValuation = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!connected) {
+      notify("サーバーに接続できないため記録できません");
+      return;
+    }
+    const replaced = accountValuations.some(
+      (v) => v.valued_on === valuationDate,
+    );
+    setSavingValuation(true);
+    try {
+      const response = await apiFetch(
+        `${API}/accounts/${account.id}/valuations`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            valued_on: valuationDate,
+            amount: valuationAmount,
+          }),
+        },
+      );
+      if (!response.ok) throw new Error();
+      const saved: AccountValuation = await response.json();
+      setValuations((all) =>
+        [
+          saved,
+          ...all.filter(
+            (v) =>
+              !(
+                v.account_id === account.id && v.valued_on === saved.valued_on
+              ),
+          ),
+        ].sort((a, b) => (a.valued_on < b.valued_on ? 1 : -1)),
+      );
+      setAccounts(await fetchAccounts());
+      setValuationAmount("");
+      setAddingValuation(false);
+      notify(
+        replaced ? "この日の評価額を更新しました" : "評価額を記録しました",
+      );
+    } catch {
+      notify("評価額を記録できませんでした");
+    } finally {
+      setSavingValuation(false);
+    }
+  };
+  const removeValuation = async (valuation: AccountValuation) => {
+    if (!connected) return;
+    const response = await apiFetch(
+      `${API}/accounts/${account.id}/valuations/${valuation.id}`,
+      { method: "DELETE" },
+    );
+    if (!response.ok) {
+      notify("評価額を削除できませんでした");
+      return;
+    }
+    setValuations((all) => all.filter((v) => v.id !== valuation.id));
+    setAccounts(await fetchAccounts());
+    notify("評価額を削除しました");
+  };
   const sixMonthDelta = series.length
     ? series[series.length - 1].value - series[0].value
     : 0;
@@ -2378,6 +2507,15 @@ function AccountDetail({
         title={account.name}
         action={
           <div className="header-actions">
+            {account.account_type === "investment" && (
+              <button
+                className="secondary"
+                type="button"
+                onClick={() => setAddingValuation((open) => !open)}
+              >
+                {addingValuation ? "入力を閉じる" : "推移を追加"}
+              </button>
+            )}
             {(account.account_type === "credit" || account.account_type === "wallet") && <label className="secondary csv-import-button">{importing ? "CSVを読み込み中…" : "PayPay CSVを読み込む"}<input type="file" accept=".csv,text/csv" disabled={importing} onChange={(event) => { previewPayPayCsv(event.target.files?.[0]); event.currentTarget.value = ""; }} /></label>}
             <button className="secondary" onClick={openEdit}>
               口座を編集
@@ -2391,7 +2529,13 @@ function AccountDetail({
       <section className="account-detail-hero">
         <span>現在残高</span>
         <strong>{money(account.current_balance)}</strong>
-        <small>取引履歴から自動計算</small>
+        <small>
+          {account.account_type === "investment"
+            ? accountValuations.length
+              ? "記録した評価額"
+              : "評価額を記録すると、その日の残高になります"
+            : "取引履歴から自動計算"}
+        </small>
       </section>
       {account.account_type === "credit" && (
         <section className="info-banner">
@@ -2425,7 +2569,53 @@ function AccountDetail({
       )}
       <div className="account-detail-grid">
         <section className="panel span-2">
-          <SectionHead title="残高の推移" />
+          <SectionHead
+            title={
+              account.account_type === "investment" ? "評価額の推移" : "残高の推移"
+            }
+          />
+          {account.account_type === "investment" && addingValuation && (
+            <form className="valuation-form" onSubmit={saveValuation}>
+              <label>
+                <span>日付</span>
+                <input
+                  type="date"
+                  required
+                  max={toDateInput(new Date().toISOString())}
+                  value={valuationDate}
+                  onChange={(event) => {
+                    const next = event.target.value;
+                    setValuationDate(next);
+                    const existing = accountValuations.find(
+                      (v) => v.valued_on === next,
+                    );
+                    setValuationAmount(
+                      existing ? String(Number(existing.amount)) : "",
+                    );
+                  }}
+                />
+              </label>
+              <label>
+                <span>その日の評価額</span>
+                <input
+                  type="number"
+                  required
+                  min="0"
+                  step="1"
+                  inputMode="numeric"
+                  value={valuationAmount}
+                  onChange={(event) => setValuationAmount(event.target.value)}
+                  placeholder="0"
+                />
+              </label>
+              <button className="primary" disabled={savingValuation}>
+                {savingValuation ? "記録中…" : "記録する"}
+              </button>
+              <p className="form-help">
+                金額を記録すると、その日の残高がこの金額になります。同じ日にもう一度記録すると上書きされます。
+              </p>
+            </form>
+          )}
           <div className="trend-summary">
             <strong>{money(account.current_balance)}</strong>
             <span
@@ -2444,8 +2634,36 @@ function AccountDetail({
           </div>
           <AssetChart
             series={series}
-            empty="取引を追加すると推移が表示されます"
+            empty={
+              account.account_type === "investment"
+                ? "評価額を記録すると推移が表示されます"
+                : "取引を追加すると推移が表示されます"
+            }
           />
+          {account.account_type === "investment" && (
+            <div className="token-list">
+              {accountValuations.length ? (
+                accountValuations.map((valuation) => (
+                  <div key={valuation.id}>
+                    <span>
+                      <strong>{valuation.valued_on.replaceAll("-", "/")}</strong>
+                      <small>この日の評価額</small>
+                    </span>
+                    <b>{money(valuation.amount)}</b>
+                    <button
+                      type="button"
+                      className="danger-link"
+                      onClick={() => removeValuation(valuation)}
+                    >
+                      削除
+                    </button>
+                  </div>
+                ))
+              ) : (
+                <p className="muted-text">まだ評価額の記録はありません</p>
+              )}
+            </div>
+          )}
         </section>
         {account.account_type === "credit" && (
           <section className="panel">
@@ -2551,6 +2769,8 @@ function RecurringPage({
   accounts,
   categories,
   setRecurring,
+  setTransactions,
+  setAccounts,
   setCategories,
   notify,
   connected,
@@ -2692,12 +2912,16 @@ function RecurringPage({
           connected={connected}
           notify={notify}
           close={() => setEditing(null)}
-          saved={(item) => {
+          saved={async (item) => {
             setRecurring((all) =>
               editing === "new"
                 ? [...all, item]
                 : all.map((x) => (x.id === item.id ? item : x)),
             );
+            if (connected) {
+              setAccounts(await fetchAccounts());
+              setTransactions(await fetchAllTransactions());
+            }
             setEditing(null);
             notify(
               editing === "new"
@@ -2711,10 +2935,70 @@ function RecurringPage({
   );
 }
 
+function CategoryDonut({
+  slices,
+  total,
+  activeId,
+}: {
+  slices: { id: string; name: string; color: string; amount: number }[];
+  total: number;
+  activeId: string | null;
+}) {
+  const size = 174;
+  const stroke = 28;
+  const radius = (size - stroke) / 2;
+  const center = size / 2;
+  const circ = 2 * Math.PI * radius;
+  const gap = slices.length > 1 ? 2 : 0;
+  let cursor = 0;
+  const active = slices.find((slice) => slice.id === activeId) ?? null;
+  return (
+    <div className={`donut-chart${active ? " has-active" : ""}`}>
+      <svg viewBox={`0 0 ${size} ${size}`} role="img" aria-label="カテゴリ別支出の円グラフ">
+        {slices.map((slice) => {
+          const raw = total > 0 ? (slice.amount / total) * circ : 0;
+          const length = slices.length === 1 ? circ : Math.max(raw - gap, 0.5);
+          const offset = cursor;
+          cursor += raw;
+          return (
+            <circle
+              key={slice.id}
+              cx={center}
+              cy={center}
+              r={radius}
+              fill="none"
+              stroke={slice.color}
+              strokeWidth={stroke}
+              strokeDasharray={slices.length === 1 ? undefined : `${length} ${circ - length}`}
+              strokeDashoffset={slices.length === 1 ? undefined : -offset}
+              transform={`rotate(-90 ${center} ${center})`}
+              className={activeId === slice.id ? "active" : ""}
+              role="button"
+              tabIndex={0}
+              data-category-id={slice.id}
+              aria-label={`${slice.name} ${money(slice.amount)}`}
+              aria-pressed={activeId === slice.id}
+            />
+          );
+        })}
+      </svg>
+      <div className="donut-center">
+        <strong>{active ? active.name : "合計"}</strong>
+        <em>{money(active ? active.amount : total)}</em>
+      </div>
+    </div>
+  );
+}
+
 function Analytics({ transactions, categories }: PageProps) {
   const [period, setPeriod] = useState<"daily" | "monthly" | "yearly">(
     "monthly",
   );
+  const [barFocus, setBarFocus] = useState<{
+    key: string;
+    kind: "income" | "expense";
+  } | null>(null);
+  const [activeCategoryId, setActiveCategoryId] = useState<string | null>(null);
   const relevant = useMemo(
     () => transactions.filter((t) => t.type !== "transfer"),
     [transactions],
@@ -2792,6 +3076,10 @@ function Analytics({ transactions, categories }: PageProps) {
     return rows;
   }, [categories, relevant]);
   const categorySpendTotal = categoryTotals.reduce((n, c) => n + c.amount, 0);
+  const activeCategory = categoryTotals.find((c) => c.id === activeCategoryId) ?? null;
+  const focusedBar = visibleRows.find((r) => r.key === barFocus?.key) ?? null;
+  const focusedAmount =
+    focusedBar && barFocus ? focusedBar[barFocus.kind] : null;
   const savingsRate = totals.income
     ? Math.round(((totals.income - totals.expense) / totals.income) * 100)
     : 0;
@@ -2802,19 +3090,28 @@ function Analytics({ transactions, categories }: PageProps) {
         <div className="segmented">
           <button
             className={period === "daily" ? "active" : ""}
-            onClick={() => setPeriod("daily")}
+            onClick={() => {
+              setPeriod("daily");
+              setBarFocus(null);
+            }}
           >
             日次
           </button>
           <button
             className={period === "monthly" ? "active" : ""}
-            onClick={() => setPeriod("monthly")}
+            onClick={() => {
+              setPeriod("monthly");
+              setBarFocus(null);
+            }}
           >
             月次
           </button>
           <button
             className={period === "yearly" ? "active" : ""}
-            onClick={() => setPeriod("yearly")}
+            onClick={() => {
+              setPeriod("yearly");
+              setBarFocus(null);
+            }}
           >
             年次
           </button>
@@ -2844,33 +3141,88 @@ function Analytics({ transactions, categories }: PageProps) {
         />
       </section>
       <div className="analytics-grid">
-        <section className="panel span-2">
+        <section className="panel span-2 cashflow-panel">
           <SectionHead title="収入と支出" />
           {visibleRows.length ? (
             <>
-              <div className="bar-chart">
+              <div className="cashflow-chart">
+              <div
+                className="bar-chart"
+                onMouseOver={(event) => {
+                  const next = barFocusFrom(event.target);
+                  if (next) setBarFocus(next);
+                }}
+                onMouseLeave={(event) => {
+                  const next = event.relatedTarget;
+                  if (next instanceof Node && event.currentTarget.contains(next)) return;
+                  const active = document.activeElement;
+                  if (active instanceof Node && event.currentTarget.contains(active)) return;
+                  setBarFocus(null);
+                }}
+                onFocus={(event) => {
+                  const next = barFocusFrom(event.target);
+                  if (next) setBarFocus(next);
+                }}
+                onBlur={(event) => {
+                  const next = event.relatedTarget;
+                  if (next instanceof Node && event.currentTarget.contains(next)) return;
+                  setBarFocus(null);
+                }}
+                onClick={(event) => {
+                  const next = barFocusFrom(event.target);
+                  if (next) setBarFocus(next);
+                }}
+              >
                 {visibleRows.map((r) => (
                   <div key={r.key}>
                     <span>
-                      <i
-                        className="income-bar"
-                        title={`収入 ${money(r.income)}`}
-                        style={{
-                          height: `${Math.max(r.income ? 3 : 0, (r.income / maxValue) * 100)}%`,
-                        }}
-                      />
-                      <i
-                        className="expense-bar"
-                        title={`支出 ${money(r.expense)}`}
-                        style={{
-                          height: `${Math.max(r.expense ? 3 : 0, (r.expense / maxValue) * 100)}%`,
-                        }}
-                      />
+                      <button
+                        type="button"
+                        className={`bar-hit${barFocus?.key === r.key && barFocus.kind === "income" ? " active" : ""}`}
+                        data-bar-key={r.key}
+                        data-bar-kind="income"
+                        aria-label={`${r.label}の収入 ${money(r.income)}`}
+                        aria-pressed={barFocus?.key === r.key && barFocus.kind === "income"}
+                      >
+                        <i
+                          className="income-bar"
+                          style={{
+                            height: `${Math.max(r.income ? 3 : 0, (r.income / maxValue) * 100)}%`,
+                          }}
+                        />
+                      </button>
+                      <button
+                        type="button"
+                        className={`bar-hit${barFocus?.key === r.key && barFocus.kind === "expense" ? " active" : ""}`}
+                        data-bar-key={r.key}
+                        data-bar-kind="expense"
+                        aria-label={`${r.label}の支出 ${money(r.expense)}`}
+                        aria-pressed={barFocus?.key === r.key && barFocus.kind === "expense"}
+                      >
+                        <i
+                          className="expense-bar"
+                          style={{
+                            height: `${Math.max(r.expense ? 3 : 0, (r.expense / maxValue) * 100)}%`,
+                          }}
+                        />
+                      </button>
                     </span>
                     <small>{r.label.replace(/^\d{4}年/, "")}</small>
                   </div>
                 ))}
               </div>
+              <p className="chart-readout" aria-live="polite">
+                {focusedBar && barFocus && focusedAmount !== null ? (
+                  <>
+                    <span>{focusedBar.label}</span>
+                    <strong className={barFocus.kind === "income" ? "amount-in" : ""}>
+                      {barFocus.kind === "income" ? "収入" : "支出"} {money(focusedAmount)}
+                    </strong>
+                  </>
+                ) : (
+                  <span></span>
+                )}
+              </p>
               <div className="legend">
                 <span>
                   <i className="income-color" />
@@ -2880,6 +3232,7 @@ function Analytics({ transactions, categories }: PageProps) {
                   <i className="expense-color" />
                   支出
                 </span>
+              </div>
               </div>
               <div className="analysis-table-wrap">
                 <table className="analysis-table">
@@ -2913,25 +3266,66 @@ function Analytics({ transactions, categories }: PageProps) {
         <section className="panel category-analysis">
           <SectionHead title="カテゴリ別支出" />
           {categoryTotals.length ? (
-            <>
-              <div
-                className="donut"
-                aria-label="カテゴリ別支出の円グラフ"
-                style={{ background: donutGradient(categoryTotals) }}
-              >
-                <strong>
-                  合計
-                  <em>{money(categorySpendTotal)}</em>
-                </strong>
-              </div>
+            <div
+              onMouseOver={(event) => {
+                const next = categoryIdFrom(event.target);
+                if (next) setActiveCategoryId(next);
+              }}
+              onMouseLeave={(event) => {
+                const next = event.relatedTarget;
+                if (next instanceof Node && event.currentTarget.contains(next)) return;
+                const active = document.activeElement;
+                if (active instanceof Node && event.currentTarget.contains(active)) return;
+                setActiveCategoryId(null);
+              }}
+              onFocus={(event) => {
+                const next = categoryIdFrom(event.target);
+                if (next) setActiveCategoryId(next);
+              }}
+              onBlur={(event) => {
+                const next = event.relatedTarget;
+                if (next instanceof Node && event.currentTarget.contains(next)) return;
+                setActiveCategoryId(null);
+              }}
+              onClick={(event) => {
+                const next = categoryIdFrom(event.target);
+                if (next) setActiveCategoryId(next);
+              }}
+            >
+              <CategoryDonut
+                slices={categoryTotals}
+                total={categorySpendTotal}
+                activeId={activeCategoryId}
+              />
+              <p className="chart-readout" aria-live="polite">
+                {activeCategory ? (
+                  <>
+                    <span>{activeCategory.name}</span>
+                    <strong>
+                      {money(activeCategory.amount)}
+                      {categorySpendTotal > 0
+                        ? `（${Math.round((activeCategory.amount / categorySpendTotal) * 100)}%）`
+                        : ""}
+                    </strong>
+                  </>
+                ) : (
+                  <span></span>
+                )}
+              </p>
               {categoryTotals.map((c) => (
-                <div className="category-row" key={c.id}>
+                <button
+                  type="button"
+                  className={`category-row${activeCategoryId === c.id ? " active" : ""}`}
+                  key={c.id}
+                  data-category-id={c.id}
+                  aria-pressed={activeCategoryId === c.id}
+                >
                   <i style={{ background: c.color }} />
                   <span>{c.name}</span>
                   <strong>{money(c.amount)}</strong>
-                </div>
+                </button>
               ))}
-            </>
+            </div>
           ) : (
             <p className="empty-chart">支出カテゴリの集計がありません。</p>
           )}

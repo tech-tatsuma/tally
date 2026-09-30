@@ -49,6 +49,18 @@ class AccountUpdate(BaseModel):
     credit_payment_account_id: uuid.UUID | None = None
 
 
+class AccountValuationCreate(BaseModel):
+    valued_on: date
+    amount: Decimal = Field(ge=0, max_digits=18, decimal_places=2)
+
+
+class AccountValuationRead(ORMModel):
+    id: uuid.UUID
+    account_id: uuid.UUID
+    valued_on: date
+    amount: Decimal
+
+
 class AccountRead(ORMModel):
     id: uuid.UUID
     name: str

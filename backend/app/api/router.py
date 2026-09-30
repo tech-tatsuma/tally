@@ -12,7 +12,7 @@ from app.core.config import get_settings
 from app.db.session import get_session
 from app.models.entities import AccountType, ApiToken, Category, McpConnection, RecurringTransaction, Transaction, TransactionType, User, UserRole
 from app.repositories.finance import FinanceRepository
-from app.schemas.common import AccountCreate, AccountRead, AccountUpdate, BulkTransactionCategoryUpdate, BulkTransactionDelete, CategoryCreate, CategoryRead, CategoryUpdate, CreditSettlementRead, PayPayImportApply, RecurringCreate, RecurringRead, RecurringUpdate, TransactionCreate, TransactionPage, TransactionRead, TransactionUpdate
+from app.schemas.common import AccountCreate, AccountRead, AccountUpdate, AccountValuationCreate, AccountValuationRead, BulkTransactionCategoryUpdate, BulkTransactionDelete, CategoryCreate, CategoryRead, CategoryUpdate, CreditSettlementRead, PayPayImportApply, RecurringCreate, RecurringRead, RecurringUpdate, TransactionCreate, TransactionPage, TransactionRead, TransactionUpdate
 from app.services.analytics import AnalyticsService
 from app.services.backup import BackupService
 from app.services.finance import FinanceService
@@ -197,6 +197,27 @@ async def get_account_balance(account_id: uuid.UUID, session: Session, user_id: 
 
 @router.get("/accounts/{account_id}/credit-settlements", response_model=list[CreditSettlementRead])
 async def list_credit_settlements(account_id: uuid.UUID, session: Session, user_id: UserId): return await FinanceService(session, user_id).list_credit_settlements(account_id)
+
+
+@router.get("/account-valuations", response_model=list[AccountValuationRead])
+async def list_account_valuations(session: Session, user_id: UserId):
+    return await FinanceService(session, user_id).list_valuations()
+
+
+@router.get("/accounts/{account_id}/valuations", response_model=list[AccountValuationRead])
+async def list_account_account_valuations(account_id: uuid.UUID, session: Session, user_id: UserId):
+    return await FinanceService(session, user_id).list_valuations(account_id)
+
+
+@router.post("/accounts/{account_id}/valuations", response_model=AccountValuationRead, status_code=201)
+async def record_account_valuation(account_id: uuid.UUID, data: AccountValuationCreate, session: Session, user_id: UserId):
+    return await FinanceService(session, user_id).record_valuation(account_id, data)
+
+
+@router.delete("/accounts/{account_id}/valuations/{valuation_id}", status_code=204)
+async def delete_account_valuation(account_id: uuid.UUID, valuation_id: uuid.UUID, session: Session, user_id: UserId):
+    await FinanceService(session, user_id).delete_valuation(account_id, valuation_id)
+    return Response(status_code=204)
 
 
 @router.post("/accounts/{account_id}/paypay-import/preview")

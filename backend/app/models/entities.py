@@ -160,6 +160,16 @@ class CreditSettlement(TimestampMixin, Base):
     settled_on: Mapped[date] = mapped_column(Date)
 
 
+class AccountValuation(TimestampMixin, Base):
+    __tablename__ = "account_valuations"
+    __table_args__ = (UniqueConstraint("account_id", "valued_on"),)
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), index=True)
+    account_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("accounts.id", ondelete="CASCADE"), index=True)
+    valued_on: Mapped[date] = mapped_column(Date, index=True)
+    amount: Mapped[Decimal] = mapped_column(Numeric(18, 2))
+
+
 class Transaction(TimestampMixin, Base):
     __tablename__ = "transactions"
     __table_args__ = (UniqueConstraint("recurring_transaction_id", "recurring_period_key"),)

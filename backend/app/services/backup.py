@@ -7,14 +7,16 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.entities import Account, Category, CreditSettlement, RecurringTransaction, Transaction
+from app.models.entities import Account, AccountValuation, Category, CreditSettlement, RecurringTransaction, Transaction
 
 
-TABLES = [Account, Category, CreditSettlement, RecurringTransaction, Transaction]
+TABLES = [Account, Category, CreditSettlement, RecurringTransaction, Transaction, AccountValuation]
 
 
 def json_value(value):
-    if isinstance(value, (datetime, Decimal, uuid.UUID)): return str(value)
+    if isinstance(value, datetime): return value.isoformat()
+    if isinstance(value, date): return value.isoformat()
+    if isinstance(value, (Decimal, uuid.UUID)): return str(value)
     if hasattr(value, "value"): return value.value
     return value
 
@@ -43,7 +45,7 @@ def database_value(column, value):
 
 class BackupEnvelope(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    schema_version: int = Field(ge=1, le=1)
+    schema_version: int = Field(ge=1, le=2)
     exported_at: datetime
     data: dict[str, list[dict]]
 
@@ -56,18 +58,21 @@ class BackupService:
         for model in TABLES:
             rows = list(await self.session.scalars(select(model).where(model.user_id == self.user_id)))
             data[model.__tablename__] = [{c.name: json_value(getattr(row, c.name)) for c in model.__table__.columns if c.name != "user_id"} for row in rows]
-        return {"schema_version": 1, "exported_at": datetime.now(timezone.utc).isoformat(), "data": data}
+        return {"schema_version": 2, "exported_at": datetime.now(timezone.utc).isoformat(), "data": data}
 
     async def restore(self, payload: dict) -> dict:
         try: envelope = BackupEnvelope.model_validate(payload)
         except Exception as exc: raise HTTPException(422, f"Invalid backup: {exc}") from exc
         required = {m.__tablename__ for m in TABLES}
-        if set(envelope.data) != required: raise HTTPException(422, "Backup tables do not match this version")
+        present = set(envelope.data)
+        if envelope.schema_version < 2:
+            present.add("account_valuations")
+        if present != required: raise HTTPException(422, "Backup tables do not match this version")
         try:
             for model in reversed(TABLES): await self.session.execute(delete(model).where(model.user_id == self.user_id))
             counts = {}
             for model in TABLES:
-                rows = envelope.data[model.__tablename__]; counts[model.__tablename__] = len(rows)
+                rows = envelope.data.get(model.__tablename__, []); counts[model.__tablename__] = len(rows)
                 for row in rows:
                     values = {
                         k: database_value(model.__table__.columns[k], v)

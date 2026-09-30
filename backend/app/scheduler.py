@@ -1,12 +1,11 @@
 import asyncio
-from datetime import date
 
 from sqlalchemy import select
 from sqlalchemy.exc import ProgrammingError, OperationalError
 
 from app.db.session import SessionLocal
 from app.models.entities import User
-from app.services.finance import FinanceService
+from app.services.finance import FinanceService, app_today
 
 
 async def process_once() -> None:
@@ -14,8 +13,8 @@ async def process_once() -> None:
         user_ids = list(await session.scalars(select(User.id).where(User.is_active.is_(True))))
         for user_id in user_ids:
             service = FinanceService(session, user_id)
-            await service.process_due_recurring_transactions(date.today())
-            await service.process_due_credit_settlements(date.today())
+            await service.process_due_recurring_transactions(app_today())
+            await service.process_due_credit_settlements(app_today())
 
 
 async def run_forever():

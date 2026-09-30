@@ -42,8 +42,9 @@ test("includes login, password recovery, profile, and role-aware management", as
   assert.match(app, /まとめて削除/);
   assert.match(app, /sortTransactionsByDate/);
   assert.match(app, /取引日が新しい順/);
-  assert.match(app, /donutGradient/);
-  assert.match(app, /style=\{\{ background: donutGradient\(categoryTotals\) \}\}/);
+  assert.match(app, /data-category-id/);
+  assert.match(app, /data-bar-kind/);
+  assert.match(css, /cashflow-panel/);
   assert.doesNotMatch(
     css,
     /conic-gradient\(#2d4b9b 0 42%,#00c4cc 42% 66%/,

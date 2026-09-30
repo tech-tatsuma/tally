@@ -7,9 +7,10 @@ from fastapi import HTTPException
 from sqlalchemy import case, delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.entities import Account, AccountType, Category, CategoryType, CreditSettlement, RecurringTransaction, Transaction, TransactionType, TransferDirection
+from app.core.config import get_settings
+from app.models.entities import Account, AccountType, AccountValuation, Category, CategoryType, CreditSettlement, RecurringTransaction, Transaction, TransactionType, TransferDirection
 from app.repositories.finance import FinanceRepository
-from app.schemas.common import AccountCreate, AccountUpdate, RecurringCreate, RecurringUpdate, TransactionCreate, TransactionUpdate
+from app.schemas.common import AccountCreate, AccountUpdate, AccountValuationCreate, RecurringCreate, RecurringUpdate, TransactionCreate, TransactionUpdate
 
 
 def add_months(year: int, month: int, delta: int) -> tuple[int, int]:
@@ -48,12 +49,28 @@ def _occurred_date(value: datetime) -> date:
     return value.astimezone(timezone.utc).date()
 
 
+def app_today() -> date:
+    return datetime.now(get_settings().timezone).date()
+
+
+def valuation_as_of(at: datetime | None) -> date:
+    if at is None:
+        return app_today()
+    if at.tzinfo is None:
+        at = at.replace(tzinfo=timezone.utc)
+    return at.astimezone(get_settings().timezone).date()
+
+
 class FinanceService:
     def __init__(self, session: AsyncSession, user_id: uuid.UUID):
         self.session, self.user_id = session, user_id
         self.repo = FinanceRepository(session)
 
     async def account_balance(self, account: Account, at: datetime | None = None) -> Decimal:
+        if account.account_type == AccountType.investment:
+            marked = await self._latest_valuation(account.id, valuation_as_of(at))
+            if marked is not None:
+                return marked
         impact = case(
             (Transaction.type == TransactionType.income, Transaction.amount),
             (Transaction.type == TransactionType.expense, -Transaction.amount),
@@ -65,6 +82,66 @@ class FinanceService:
         if at: filters.append(Transaction.occurred_at <= at)
         movement = await self.session.scalar(select(func.coalesce(func.sum(impact), 0)).where(*filters))
         return Decimal(account.initial_balance) + Decimal(movement or 0)
+
+    async def _latest_valuation(self, account_id: uuid.UUID, as_of: date) -> Decimal | None:
+        amount = await self.session.scalar(
+            select(AccountValuation.amount)
+            .where(
+                AccountValuation.user_id == self.user_id,
+                AccountValuation.account_id == account_id,
+                AccountValuation.valued_on <= as_of,
+            )
+            .order_by(AccountValuation.valued_on.desc())
+            .limit(1)
+        )
+        return None if amount is None else Decimal(amount)
+
+    async def list_valuations(self, account_id: uuid.UUID | None = None) -> list[AccountValuation]:
+        if account_id is not None and not await self.repo.account(self.user_id, account_id):
+            raise HTTPException(404, "Account not found")
+        filters = [AccountValuation.user_id == self.user_id]
+        if account_id is not None:
+            filters.append(AccountValuation.account_id == account_id)
+        return list(await self.session.scalars(
+            select(AccountValuation).where(*filters).order_by(AccountValuation.valued_on.desc(), AccountValuation.created_at.desc())
+        ))
+
+    async def record_valuation(self, account_id: uuid.UUID, data: AccountValuationCreate) -> AccountValuation:
+        account = await self.repo.account(self.user_id, account_id)
+        if not account:
+            raise HTTPException(404, "Account not found")
+        if account.account_type != AccountType.investment:
+            raise HTTPException(422, "Valuations can only be recorded for investment accounts")
+        if data.valued_on > app_today():
+            raise HTTPException(422, "Valuation date cannot be in the future")
+        existing = await self.session.scalar(
+            select(AccountValuation).where(
+                AccountValuation.user_id == self.user_id,
+                AccountValuation.account_id == account_id,
+                AccountValuation.valued_on == data.valued_on,
+            )
+        )
+        if existing:
+            existing.amount = data.amount
+            row = existing
+        else:
+            row = AccountValuation(user_id=self.user_id, account_id=account_id, valued_on=data.valued_on, amount=data.amount)
+            self.session.add(row)
+        await self.session.commit()
+        await self.session.refresh(row)
+        return row
+
+    async def delete_valuation(self, account_id: uuid.UUID, valuation_id: uuid.UUID) -> None:
+        result = await self.session.execute(
+            delete(AccountValuation).where(
+                AccountValuation.user_id == self.user_id,
+                AccountValuation.account_id == account_id,
+                AccountValuation.id == valuation_id,
+            )
+        )
+        if not result.rowcount:
+            raise HTTPException(404, "Valuation not found")
+        await self.session.commit()
 
     async def list_accounts(self, include_archived: bool = False) -> list[dict]:
         filters = [Account.user_id == self.user_id]
@@ -220,7 +297,8 @@ class FinanceService:
         await self.validate_category(data.category_id, data.type)
         next_date = self._next_occurrence(data.start_date, data.execution_day, data.frequency.value)
         recurring = RecurringTransaction(user_id=self.user_id, next_execution_date=next_date, **data.model_dump())
-        self.session.add(recurring); await self.session.commit(); await self.session.refresh(recurring); return recurring
+        self.session.add(recurring); await self.session.commit(); await self.session.refresh(recurring)
+        return await self._post_if_due_today(recurring)
 
     async def update_recurring(self, recurring_id: uuid.UUID, data: RecurringUpdate) -> RecurringTransaction:
         recurring = await self.session.scalar(select(RecurringTransaction).where(RecurringTransaction.id == recurring_id, RecurringTransaction.user_id == self.user_id))
@@ -234,9 +312,16 @@ class FinanceService:
         if recurring.end_date and recurring.start_date > recurring.end_date:
             raise HTTPException(422, "start_date must be before end_date")
         if {"start_date", "execution_day", "frequency"} & data.model_fields_set:
-            base = max(recurring.start_date, date.today())
+            base = max(recurring.start_date, app_today())
             recurring.next_execution_date = self._next_occurrence(base, recurring.execution_day, recurring.frequency.value)
-        await self.session.commit(); await self.session.refresh(recurring); return recurring
+        await self.session.commit(); await self.session.refresh(recurring)
+        return await self._post_if_due_today(recurring)
+
+    async def _post_if_due_today(self, recurring: RecurringTransaction) -> RecurringTransaction:
+        if recurring.enabled and recurring.next_execution_date == app_today():
+            await self.process_due_recurring_transactions(app_today())
+            await self.session.refresh(recurring)
+        return recurring
 
     @staticmethod
     def _next_occurrence(base: date, day: int, frequency: str) -> date:

@@ -1,5 +1,5 @@
 import uuid
-from datetime import date, datetime, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 
 import pytest
@@ -9,10 +9,11 @@ from sqlalchemy import select
 
 from app.models.entities import Account, AccountType, Category, CategoryType, CreditSettlement, Transaction
 from app.api.router import update_category
-from app.schemas.common import AccountCreate, AccountUpdate, BulkTransactionDelete, CategoryUpdate, RecurringCreate, RecurringUpdate, TransactionCreate, TransactionUpdate
+from app.core.config import get_settings
+from app.schemas.common import AccountCreate, AccountUpdate, AccountValuationCreate, BulkTransactionDelete, CategoryUpdate, RecurringCreate, RecurringUpdate, TransactionCreate, TransactionUpdate
 from app.services.analytics import AnalyticsService
 from app.services.backup import BackupService
-from app.services.finance import FinanceService, calendar_date, closing_on_or_after, iter_due_closing_dates, payment_date_for_closing
+from app.services.finance import FinanceService, app_today, calendar_date, closing_on_or_after, iter_due_closing_dates, payment_date_for_closing
 from app.services.paypay_import import preview_paypay_import
 from tests.conftest import USER_ID
 
@@ -97,6 +98,17 @@ async def test_recurring_is_idempotent(session):
     await service.create_recurring(RecurringCreate(account_id=accounts[0].id, category_id=expense.id, type="expense", amount="80000", title="Rent", frequency="monthly", start_date=date(2026, 8, 1), execution_day=25))
     assert await service.process_due_recurring_transactions(date(2026, 8, 25)) == 1
     assert await service.process_due_recurring_transactions(date(2026, 8, 25)) == 0
+
+
+async def test_recurring_due_today_is_posted_when_created(session):
+    accounts, expense, _ = await fixtures(session); service = FinanceService(session, USER_ID)
+    today = app_today()
+    recurring = await service.create_recurring(RecurringCreate(account_id=accounts[0].id, category_id=expense.id, type="expense", amount="500", title="Due today", frequency="monthly", start_date=date(today.year, today.month, 1), execution_day=today.day))
+    posted = list(await session.scalars(select(Transaction).where(Transaction.recurring_transaction_id == recurring.id)))
+    assert len(posted) == 1
+    assert posted[0].occurred_at.date() == today
+    assert recurring.next_execution_date > today
+    assert await service.process_due_recurring_transactions(today) == 0
 
 
 async def test_recurring_update_changes_schedule(session):
@@ -240,6 +252,38 @@ async def test_credit_settlement_late_entry_after_period_already_settled(session
     settlements = await service.list_credit_settlements(card_account.id)
     assert [s.period_key for s in settlements] == ["2026-09", "2026-08"]
     assert settlements[0].amount == Decimal("400")
+
+
+async def test_investment_valuation_replaces_that_days_balance(session):
+    service = FinanceService(session, USER_ID)
+    account = Account(user_id=USER_ID, name="Brokerage", account_type=AccountType.investment, initial_balance=Decimal("1000"))
+    session.add(account)
+    await session.commit()
+    today = app_today()
+    yesterday = today - timedelta(days=1)
+    zone = get_settings().timezone
+    await service.record_valuation(account.id, AccountValuationCreate(valued_on=yesterday, amount=Decimal("200000")))
+    assert (await service.get_account(account.id))["current_balance"] == Decimal("200000")
+    await service.record_valuation(account.id, AccountValuationCreate(valued_on=today, amount=Decimal("210000")))
+    assert (await service.get_account(account.id))["current_balance"] == Decimal("210000")
+    await service.record_valuation(account.id, AccountValuationCreate(valued_on=today, amount=Decimal("205000")))
+    assert (await service.get_account(account.id))["current_balance"] == Decimal("205000")
+    assert len(await service.list_valuations(account.id)) == 2
+    at_yesterday = datetime.combine(yesterday, time.max, tzinfo=zone)
+    assert await service.account_balance(account, at_yesterday) == Decimal("200000")
+    before = datetime.combine(yesterday - timedelta(days=1), time.max, tzinfo=zone)
+    assert await service.account_balance(account, before) == Decimal("1000")
+    accounts, _, _ = await fixtures(session)
+    bank = next(item for item in accounts if item.account_type == AccountType.bank)
+    with pytest.raises(HTTPException) as rejected:
+        await service.record_valuation(bank.id, AccountValuationCreate(valued_on=today, amount=Decimal("1")))
+    assert rejected.value.status_code == 422
+    with pytest.raises(HTTPException) as future:
+        await service.record_valuation(account.id, AccountValuationCreate(valued_on=today + timedelta(days=1), amount=Decimal("1")))
+    assert future.value.status_code == 422
+    today_row = next(row for row in await service.list_valuations(account.id) if row.valued_on == today)
+    await service.delete_valuation(account.id, today_row.id)
+    assert (await service.get_account(account.id))["current_balance"] == Decimal("200000")
 
 
 async def test_backup_round_trip(session):
