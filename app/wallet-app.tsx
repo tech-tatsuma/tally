@@ -1272,6 +1272,7 @@ function AssetChart({
   series: { label: string; value: number }[];
   empty: string;
 }) {
+  const [activeIndex, setActiveIndex] = useState<number | null>(null);
   if (!series.length) return <p className="empty-chart">{empty}</p>;
   const values = series.map((p) => p.value);
   const min = Math.min(0, ...values);
@@ -1287,6 +1288,12 @@ function AssetChart({
     (point, index) => `${xOf(index)},${yOf(point.value)}`,
   );
   const line = `M${coords.join(" L")}`;
+  const safeIndex =
+    activeIndex != null && series[activeIndex] ? activeIndex : null;
+  const active = safeIndex == null ? null : series[safeIndex];
+  const activeX = safeIndex == null ? 0 : xOf(safeIndex) / 700;
+  const activeY = safeIndex == null ? 0 : yOf(series[safeIndex].value);
+  const tipAlign = activeX < 0.18 ? "start" : activeX > 0.82 ? "end" : "center";
   return (
     <div className="chart-wrap">
       <div className="chart-y">
@@ -1294,22 +1301,76 @@ function AssetChart({
           <span key={i}>{compactYen(tick)}</span>
         ))}
       </div>
-      <svg viewBox="0 0 700 180" role="img" aria-label="資産の推移">
-        <defs>
-          <linearGradient id="area" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0" stopColor="#00c4cc" stopOpacity=".28" />
-            <stop offset="1" stopColor="#00c4cc" stopOpacity="0" />
-          </linearGradient>
-        </defs>
-        <path
-          className="area"
-          d={`${line} L${xOf(series.length - 1)},180 L0,180 Z`}
-        />
-        <path className="line" d={line} />
-      </svg>
+      <div className="chart-plot">
+        <svg viewBox="0 0 700 180" aria-hidden="true">
+          <defs>
+            <linearGradient id="area" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0" stopColor="#00c4cc" stopOpacity=".28" />
+              <stop offset="1" stopColor="#00c4cc" stopOpacity="0" />
+            </linearGradient>
+          </defs>
+          <path
+            className="area"
+            d={`${line} L${xOf(series.length - 1)},180 L0,180 Z`}
+          />
+          <path className="line" d={line} />
+          {safeIndex != null && (
+            <circle
+              className="chart-point"
+              cx={xOf(safeIndex)}
+              cy={yOf(series[safeIndex].value)}
+              r="5"
+            />
+          )}
+        </svg>
+        <div className="chart-hits">
+          {series.map((point, index) => {
+            const left =
+              index === 0 ? 0 : ((xOf(index - 1) + xOf(index)) / 2 / 700) * 100;
+            const right =
+              index === series.length - 1
+                ? 100
+                : ((xOf(index) + xOf(index + 1)) / 2 / 700) * 100;
+            return (
+              <button
+                key={`${point.label}-${index}`}
+                type="button"
+                className="chart-hit"
+                style={{ left: `${left}%`, width: `${right - left}%` }}
+                aria-label={`${point.label}の資産額 ${money(point.value)}`}
+                onMouseEnter={() => setActiveIndex(index)}
+                onMouseLeave={(event) => {
+                  if (document.activeElement === event.currentTarget) return;
+                  setActiveIndex((current) => (current === index ? null : current));
+                }}
+                onFocus={() => setActiveIndex(index)}
+                onBlur={() =>
+                  setActiveIndex((current) => (current === index ? null : current))
+                }
+                onClick={() => setActiveIndex(index)}
+              />
+            );
+          })}
+        </div>
+        {active && safeIndex != null && (
+          <p
+            className={`chart-point-tip align-${tipAlign}${activeY < 42 ? " below" : ""}`}
+            style={{ left: `${activeX * 100}%`, top: `${(activeY / 180) * 100}%` }}
+            role="status"
+          >
+            <span>{active.label}</span>
+            <strong>{money(active.value)}</strong>
+          </p>
+        )}
+      </div>
       <div className="chart-x">
         {series.map((point, index) => (
-          <span key={`${point.label}-${index}`}>{point.label}</span>
+          <span
+            key={`${point.label}-${index}`}
+            className={index === safeIndex ? "active" : ""}
+          >
+            {point.label}
+          </span>
         ))}
       </div>
     </div>
@@ -1321,6 +1382,8 @@ const transactionKindLabel: Record<Transaction["type"], string> = {
   expense: "支出",
   transfer: "振替",
 };
+const transactionInflow = (t: Pick<Transaction, "type" | "transfer_direction">) =>
+  t.type === "income" || t.transfer_direction === "credit";
 
 function TransactionList({
   items,
@@ -1393,8 +1456,8 @@ function TransactionList({
             </span>
             {detailed && <span className="detail-account">{accountName}</span>}
             {detailed && <span className="detail-note">{note}</span>}
-            <b className={t.type === "income" ? "amount-in" : ""}>
-              {t.type === "income" ? "+" : "−"}
+            <b className={transactionInflow(t) ? "amount-in" : ""}>
+              {transactionInflow(t) ? "+" : "−"}
               {money(t.amount)}
             </b>
           </button>
@@ -1626,9 +1689,9 @@ function Transactions({
             <p className="eyebrow">TRANSACTION DETAIL</p>
             <h2>{selected.title}</h2>
             <strong
-              className={`detail-amount ${selected.type === "income" ? "amount-in" : ""}`}
+              className={`detail-amount ${transactionInflow(selected) ? "amount-in" : ""}`}
             >
-              {selected.type === "income" ? "+" : "−"}
+              {transactionInflow(selected) ? "+" : "−"}
               {money(selected.amount)}
             </strong>
             <dl>
